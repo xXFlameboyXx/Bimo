@@ -80,11 +80,47 @@ class BimoSimulatorApp:
 
         self.agent_input = None
         self.voice_service = None
+        self.agent = None
+        self.tts = None
+        self.tool_registry = None
+
+        if enable_agent:
+            try:
+                from bimo.agent.factory import create_bimo_agent, create_default_tool_registry
+                from bimo.voice.factory import create_tts
+
+                self.tts = create_tts(self.config.audio, event_bus=self.event_bus)
+                self.tool_registry = create_default_tool_registry(
+                    tts=self.tts,
+                    state_machine=self.state_machine,
+                    event_bus=self.event_bus,
+                )
+                if self.config.pc_agent.enabled:
+                    try:
+                        from bimo.pc.client import PCAgentClient
+                        from bimo.pc.tools import register_pc_tools
+
+                        pc_client = PCAgentClient(self.config.pc_agent, event_bus=self.event_bus)
+                        register_pc_tools(self.tool_registry, pc_client)
+                    except Exception as pc_err:
+                        logger.warning("Could not register PC agent tools: %s", pc_err)
+
+                self.agent = create_bimo_agent(
+                    config=self.config,
+                    tts=self.tts,
+                    event_bus=self.event_bus,
+                    state_machine=self.state_machine,
+                    tool_registry=self.tool_registry,
+                )
+                logger.info("BimoAgent initialized with LLM, TTS, and tool registry.")
+            except Exception as exc:
+                logger.warning("Could not initialize BimoAgent: %s", exc)
+
         if enable_voice:
             try:
                 from bimo.voice import DefaultAgentInput, create_voice_service
 
-                self.agent_input = DefaultAgentInput()
+                self.agent_input = self.agent or DefaultAgentInput()
                 self.voice_service = create_voice_service(
                     config=self.config.audio,
                     event_bus=self.event_bus,
@@ -134,15 +170,16 @@ class BimoSimulatorApp:
                     text = event.data.get("transcript", "")
                     self.renderer.display_status(f"Heard: '{text}'")
 
-                    # In Phase 3 (before LLM is active), return to IDLE after 3.0s display
-                    def _reset_thinking() -> None:
-                        time.sleep(3.0)
-                        if self.state_machine.current_state == RobotState.THINKING:
-                            self.state_machine.transition_to(
-                                RobotState.IDLE, reason="Awaiting next speech turn"
-                            )
+                    # If agent is NOT active, return to IDLE after 3.0s display
+                    if not self.agent:
+                        def _reset_thinking() -> None:
+                            time.sleep(3.0)
+                            if self.state_machine.current_state == RobotState.THINKING:
+                                self.state_machine.transition_to(
+                                    RobotState.IDLE, reason="Awaiting next speech turn"
+                                )
 
-                    threading.Thread(target=_reset_thinking, daemon=True).start()
+                        threading.Thread(target=_reset_thinking, daemon=True).start()
                 elif event.type == EventType.VOICE_ACTIVITY_STARTED:
                     self.renderer.display_status("Listening to you...")
                 elif event.type == EventType.VOICE_ACTIVITY_STOPPED:
@@ -482,6 +519,11 @@ def main() -> None:
         help="Enable live voice input subsystem (microphone & speech recognition)",
     )
     parser.add_argument(
+        "--agent",
+        action="store_true",
+        help="Enable full Bimo AI Agent (LLM reasoning, tool system, and Piper TTS)",
+    )
+    parser.add_argument(
         "--blank", "--clear",
         action="store_true",
         help="Immediately blank the physical LCD to black and exit",
@@ -503,7 +545,12 @@ def main() -> None:
             backend = "physical_lcd"
             logger.info("Detected /dev/fb1: auto-selecting 'physical_lcd' backend")
 
-    app = BimoSimulatorApp(backend=backend, enable_voice=args.voice)
+    enable_voice = args.voice or args.agent
+    app = BimoSimulatorApp(
+        backend=backend,
+        enable_voice=enable_voice,
+        enable_agent=args.agent,
+    )
     app.run()
 
 
