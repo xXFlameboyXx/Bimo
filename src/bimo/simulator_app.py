@@ -37,7 +37,12 @@ logger = logging.getLogger("bimo.simulator")
 class BimoSimulatorApp:
     """Simulator coordinator connecting events, state machine, and GUI renderer."""
 
-    def __init__(self, backend: str | None = None, enable_voice: bool = False) -> None:
+    def __init__(
+        self,
+        backend: str | None = None,
+        enable_voice: bool = False,
+        enable_agent: bool = False,
+    ) -> None:
         self.config = Config.from_env()
         if backend:
             is_phys = backend.lower() in ("physical_lcd", "fb", "ili9486", "spi_ili9486")
