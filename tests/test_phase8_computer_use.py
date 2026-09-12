@@ -70,33 +70,15 @@ from __future__ import annotations
 
 import base64
 import unittest
-from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock
 
 from bimo.agent.bimo_agent import BimoAgent
-from bimo.agent.context import ConversationContext
-from bimo.core.config import PCAgentConfig
 from bimo.core.events import Event, EventBus, EventType
-from bimo.interfaces.llm import LLMProvider, LLMRequest, LLMResponse, Message, ToolCall
-from bimo.interfaces.voice import BaseTextToSpeech
+from bimo.interfaces.llm import LLMProvider, LLMRequest, LLMResponse, ToolCall
 from bimo.pc.mock_client import MockPCAgentClient
-from bimo.pc.models import PCErrorCode, PCResponse
-from bimo.pc.tools import (
-    PCClickTool,
-    PCCloseAppTool,
-    PCFocusWindowTool,
-    PCGetActiveWindowTool,
-    PCGetScreenSizeTool,
-    PCGetStatusTool,
-    PCMoveMouseTool,
-    PCOpenAppTool,
-    PCPressKeyTool,
-    PCScreenshotTool,
-    PCScrollTool,
-    PCTypeTextTool,
-    register_pc_tools,
-)
-from bimo.pc.vision import DesktopCapture, ScreenControllerDesktopCapture, Screenshot
+from bimo.pc.models import PCErrorCode
+from bimo.pc.tools import register_pc_tools
+from bimo.pc.vision import ScreenControllerDesktopCapture, Screenshot
 from bimo.tools.permissions import PermissionPolicy, ToolPermission
 from bimo.tools.registry import ToolRegistry
 from windows_agent.commands import build_default_command_registry
@@ -120,7 +102,10 @@ class TestScreenCommands(unittest.TestCase):
             PCCommandSpec(
                 name="pc.get_screen_size",
                 description="Get primary monitor screen resolution",
-                handler=lambda args: self.screen.get_screen_size(),
+                handler=lambda args: {
+                    "width": self.screen.get_screen_size()[0],
+                    "height": self.screen.get_screen_size()[1],
+                },
             )
         )
         self.registry.register(
@@ -134,11 +119,13 @@ class TestScreenCommands(unittest.TestCase):
     def test_get_screen_size_success(self) -> None:
         resp = self.registry.execute("req-1", "pc.get_screen_size", {})
         self.assertTrue(resp.success)
-        self.assertEqual(resp.output, (1920, 1080))
+        self.assertEqual(resp.output, {"width": 1920, "height": 1080})
 
     def test_screenshot_success_and_dimensions(self) -> None:
         resp = self.registry.execute("req-2", "pc.screenshot", {})
         self.assertTrue(resp.success)
+        self.assertIsNotNone(resp.output)
+        assert resp.output is not None
         shot = resp.output
         self.assertEqual(shot["width"], 1920)
         self.assertEqual(shot["height"], 1080)
@@ -353,6 +340,7 @@ class TestBimoPermissionsPhase8(unittest.TestCase):
         for tool_name in ["pc.get_status", "pc.get_active_window", "pc.get_screen_size", "pc.screenshot"]:
             tool = self.registry.get(tool_name)
             self.assertIsNotNone(tool)
+            assert tool is not None
             self.assertEqual(tool.permission, ToolPermission.SAFE)
             # Execute without confirmation flag
             res = self.registry.execute(tool_name, permission_policy=self.policy, context={})
@@ -372,6 +360,7 @@ class TestBimoPermissionsPhase8(unittest.TestCase):
         for name, kwargs in confirm_cases:
             tool = self.registry.get(name)
             self.assertIsNotNone(tool)
+            assert tool is not None
             self.assertEqual(tool.permission, ToolPermission.CONFIRM)
             # Execute without confirmed=True
             res = self.registry.execute(name, permission_policy=self.policy, context={}, **kwargs)
@@ -397,11 +386,11 @@ class TestBimoPermissionsPhase8(unittest.TestCase):
 class MockMultiTurnLLM(LLMProvider):
     """Mock LLM that executes scripted sequential turns for computer-use testing."""
 
-    def __init__(self, responses: List[LLMResponse]) -> None:
+    def __init__(self, responses: list[LLMResponse]) -> None:
         super().__init__(model_name="mock-turn-llm")
         self.responses = responses
         self.call_count = 0
-        self.requests: List[LLMRequest] = []
+        self.requests: list[LLMRequest] = []
 
     @property
     def provider_name(self) -> str:
@@ -428,7 +417,7 @@ class TestComputerUseLoop(unittest.TestCase):
         register_pc_tools(self.tool_registry, self.client)
         self.policy = PermissionPolicy()
         self.event_bus = EventBus()
-        self.events_received: List[Event] = []
+        self.events_received: list[Event] = []
         self.event_bus.subscribe(None, lambda ev: self.events_received.append(ev))
 
     def test_single_action_execution(self) -> None:
@@ -590,28 +579,40 @@ class TestSecurityBoundaries(unittest.TestCase):
         # Ensure pc.open_app strictly rejects arbitrary paths and shells
         resp1 = self.command_registry.execute("req-1", "pc.open_app", {"app": "cmd.exe"})
         self.assertFalse(resp1.success)
+        self.assertIsNotNone(resp1.error)
+        assert resp1.error is not None
         self.assertEqual(resp1.error.code, PCErrorCode.APP_NOT_ALLOWED.value)
 
         resp2 = self.command_registry.execute("req-2", "pc.open_app", {"app": "powershell.exe"})
         self.assertFalse(resp2.success)
+        self.assertIsNotNone(resp2.error)
+        assert resp2.error is not None
         self.assertEqual(resp2.error.code, PCErrorCode.APP_NOT_ALLOWED.value)
 
         resp3 = self.command_registry.execute("req-3", "pc.open_app", {"app": "C:\\Windows\\notepad.exe"})
         self.assertFalse(resp3.success)
+        self.assertIsNotNone(resp3.error)
+        assert resp3.error is not None
         self.assertEqual(resp3.error.code, PCErrorCode.APP_NOT_ALLOWED.value)
 
     def test_invalid_mouse_coordinates_rejected_by_command_registry(self) -> None:
         resp1 = self.command_registry.execute("req-1", "pc.move_mouse", {"x": -10, "y": 50})
         self.assertFalse(resp1.success)
+        self.assertIsNotNone(resp1.error)
+        assert resp1.error is not None
         self.assertEqual(resp1.error.code, PCErrorCode.INVALID_ARGUMENTS.value)
 
         resp2 = self.command_registry.execute("req-2", "pc.move_mouse", {"x": 2000, "y": 50})
         self.assertFalse(resp2.success)
+        self.assertIsNotNone(resp2.error)
+        assert resp2.error is not None
         self.assertEqual(resp2.error.code, PCErrorCode.INVALID_ARGUMENTS.value)
 
     def test_invalid_keys_rejected_by_command_registry(self) -> None:
         resp = self.command_registry.execute("req-1", "pc.press_key", {"key": "MALICIOUS_KEY"})
         self.assertFalse(resp.success)
+        self.assertIsNotNone(resp.error)
+        assert resp.error is not None
         self.assertEqual(resp.error.code, PCErrorCode.KEY_NOT_ALLOWED.value)
 
 

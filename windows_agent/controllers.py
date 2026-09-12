@@ -576,6 +576,7 @@ class MockWindowController(WindowController):
         self.closed_calls: List[str] = []
         self.focused_titles: List[str] = []
         self.available_windows: List[str] = ["Untitled - Notepad", "Calculator", "File Explorer"]
+        self.visible_windows: List[Dict[str, Any]] = []
 
     def get_active_window(self) -> Dict[str, Any]:
         return {
@@ -589,7 +590,11 @@ class MockWindowController(WindowController):
         if not norm:
             raise ValueError("Window title must be a non-empty string.")
 
-        matches = [w for w in self.available_windows if norm in w.lower()]
+        if self.visible_windows:
+            matches = [w["title"] for w in self.visible_windows if norm in str(w.get("title", "")).lower()]
+        else:
+            matches = [w for w in self.available_windows if norm in w.lower()]
+
         if not matches:
             raise ValueError(f"No visible window found matching title '{title}'.")
 
