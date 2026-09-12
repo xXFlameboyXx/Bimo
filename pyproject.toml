@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bimo"
+version = "0.1.0"
+description = "Bimo: Physical Desktop AI Robot Hub"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "sounddevice>=0.5.0",
+    "numpy>=1.24.0",
+    "openwakeword>=0.6.0",
+    "faster-whisper>=1.0.0",
+    "piper-tts>=1.2.0",
+    "pathvalidate>=3.0.0",
+    "SpeechRecognition>=3.10.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
