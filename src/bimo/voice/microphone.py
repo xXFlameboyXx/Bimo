@@ -55,6 +55,8 @@ class PCMicrophone(BaseMicrophone):
         self.device_index = device_index
         self._queue: queue.Queue[bytes] = queue.Queue(maxsize=100)
         self._stream: Any = None
+        self._hw_samplerate: int = sample_rate
+        self._hw_channels: int = channels
 
     def connect(self) -> bool:
         """Verify that audio hardware is accessible."""
@@ -99,9 +101,27 @@ class PCMicrophone(BaseMicrophone):
         if status:
             logger.warning("Microphone stream status: %s", status)
 
-        # Convert to 16-bit signed integer PCM bytes
         try:
-            raw_bytes = indata.tobytes()
+            import numpy as np
+
+            # 1. Downmix stereo to mono if multi-channel hardware
+            if indata.ndim > 1 and indata.shape[1] > 1:
+                mono = np.mean(indata.astype(np.float32), axis=1)
+            else:
+                mono = indata.flatten().astype(np.float32)
+
+            # 2. Fast zero-latency interpolation if hardware sample rate differs from target 16kHz
+            hw_sr = getattr(self, "_hw_samplerate", self.sample_rate)
+            if hw_sr != self.sample_rate:
+                target_len = int(round(len(mono) * self.sample_rate / hw_sr))
+                indices = np.linspace(0, len(mono) - 1, target_len)
+                resampled = np.interp(indices, np.arange(len(mono)), mono)
+                pcm_data = np.clip(resampled, -32768, 32767).astype(np.int16)
+            else:
+                pcm_data = np.clip(mono, -32768, 32767).astype(np.int16)
+
+            raw_bytes = pcm_data.tobytes()
+
             # Drop oldest chunks if queue is full to prevent memory explosion
             if self._queue.full():
                 try:
@@ -121,11 +141,29 @@ class PCMicrophone(BaseMicrophone):
             raise RuntimeError("sounddevice is required for PCMicrophone audio capture")
 
         try:
+            hw_sr = self.sample_rate
+            hw_ch = self.channels
+            try:
+                dev_info = sd.query_devices(self.device_index, "input")
+                default_sr = dev_info.get("default_samplerate")
+                if default_sr and default_sr > 0:
+                    hw_sr = int(default_sr)
+                max_ch = dev_info.get("max_input_channels", 1)
+                hw_ch = min(2, max(1, int(max_ch)))
+            except Exception as query_err:
+                logger.debug("Could not query native device parameters: %s", query_err)
+
+            self._hw_samplerate = hw_sr
+            self._hw_channels = hw_ch
+
+            # Calculate hardware blocksize so captured audio duration matches target chunk_size
+            hw_blocksize = int(round(self.chunk_size * (hw_sr / self.sample_rate)))
+
             self._stream = sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=self.channels,
+                samplerate=hw_sr,
+                channels=hw_ch,
                 dtype="int16",
-                blocksize=self.chunk_size,
+                blocksize=hw_blocksize,
                 device=self.device_index,
                 callback=self._audio_callback,
             )
@@ -133,9 +171,10 @@ class PCMicrophone(BaseMicrophone):
             self._is_recording = True
             self.set_status(DeviceStatus.BUSY)
             logger.info(
-                "PCMicrophone stream started (%d Hz, %d ch, chunk=%d)",
+                "PCMicrophone stream started (hardware: %d Hz, %d ch -> output: %d Hz mono, chunk=%d)",
+                hw_sr,
+                hw_ch,
                 self.sample_rate,
-                self.channels,
                 self.chunk_size,
             )
         except Exception as e:

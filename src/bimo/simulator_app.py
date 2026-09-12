@@ -42,8 +42,27 @@ class BimoSimulatorApp:
         backend: str | None = None,
         enable_voice: bool = False,
         enable_agent: bool = False,
+        mock_llm: bool = False,
+        direct_voice: bool = False,
     ) -> None:
+        self.direct_voice = direct_voice
         self.config = Config.from_env()
+        if mock_llm:
+            from bimo.core.config import LLMConfig
+
+            self.config = Config(
+                robot_name=self.config.robot_name,
+                environment=self.config.environment,
+                display=self.config.display,
+                audio=self.config.audio,
+                llm=LLMConfig(
+                    provider="local",
+                    model="bimo-local-conversational",
+                ),
+                laptop=self.config.laptop,
+                pc_agent=self.config.pc_agent,
+                logging=self.config.logging,
+            )
         if backend:
             is_phys = backend.lower() in ("physical_lcd", "fb", "ili9486", "spi_ili9486")
             def_w = 480 if is_phys else 800
@@ -130,11 +149,13 @@ class BimoSimulatorApp:
                     config=self.config.audio,
                     event_bus=self.event_bus,
                     agent_input=self.agent_input,
+                    include_wake_word=not self.direct_voice,
                 )
                 logger.info(
-                    "Voice service initialized with %s (STT: %s)",
+                    "Voice service initialized with %s (STT: %s, mode: %s)",
                     self.voice_service.microphone.name,
                     self.voice_service.stt.provider_name,
+                    "Direct Voice" if self.direct_voice else "Wake Word",
                 )
             except Exception as e:
                 logger.warning("Could not initialize voice subsystem: %s", e)
@@ -232,13 +253,17 @@ class BimoSimulatorApp:
         # Domain events
         match key:
             case "w":
-                self.event_bus.publish(
-                    Event(
-                        type=EventType.WAKE_WORD_DETECTED,
-                        data={"keyword": "Hey Bimo"},
-                        source="keyboard_sim",
+                if self.voice_service:
+                    logger.info("Triggering speech capture via keyboard [W] key...")
+                    self.voice_service.trigger_wake_word(model_name="keyboard")
+                else:
+                    self.event_bus.publish(
+                        Event(
+                            type=EventType.WAKE_WORD_DETECTED,
+                            data={"keyword": "Hey Bimo"},
+                            source="keyboard_sim",
+                        )
                     )
-                )
 
             case "u":
                 self.event_bus.publish(
@@ -414,12 +439,16 @@ class BimoSimulatorApp:
             spd = self.renderer.get_idle_category_frame_interval(cat_name)
             print(f"   * {cat_name:<10}: duration={dur:5.1f}s | frame_interval={spd:4.2f}s ({len(frames)} frames)")
         print("=" * 60)
+        if getattr(self, "direct_voice", False):
+            print("  Voice Mode: DIRECT (Continuous listening in IDLE - speak anytime!)")
+        elif self.voice_service and self.voice_service.wake_word_detector:
+            print("  Voice Mode: WAKE WORD ('Hey Jarvis' / 'Alexa' or tap [W] key)")
         print("  Keyboard Controls (active on face window):")
         print("   [1-8] Manual States: 1=IDLE, 2=LISTEN, 3=THINK,")
         print("         4=EXECUTE, 5=SPEAK, 6=SUCCESS, 7=ERROR, 8=SLEEP")
         print("   [I]   Rotate IDLE Sub-Category (instant cycle)")
-        print("   [W]   Wake Word ('Hey Bimo')")
-        print("   [U]   User Spoke")
+        print("   [W]   Wake Word (opens microphone capture immediately)")
+        print("   [U]   User Spoke (simulated)")
         print("   [R]   Speech Received (starts Thinking)")
         print("   [A]   AI Started")
         print("   [F]   AI Finished (starts Speaking)")
@@ -529,6 +558,18 @@ def main() -> None:
         help="Enable full Bimo AI Agent (LLM reasoning, tool system, and Piper TTS)",
     )
     parser.add_argument(
+        "--mock-llm", "--offline", "--local",
+        action="store_true",
+        dest="mock_llm",
+        help="Use local conversational mock LLM without requiring an external OmniRoute/network connection",
+    )
+    parser.add_argument(
+        "--direct-voice", "--always-listen", "--vad", "--no-wake-word",
+        action="store_true",
+        dest="direct_voice",
+        help="Direct voice mode: listen and respond whenever you speak in IDLE, without needing a wake word",
+    )
+    parser.add_argument(
         "--blank", "--clear",
         action="store_true",
         help="Immediately blank the physical LCD to black and exit",
@@ -550,11 +591,13 @@ def main() -> None:
             backend = "physical_lcd"
             logger.info("Detected /dev/fb1: auto-selecting 'physical_lcd' backend")
 
-    enable_voice = args.voice or args.agent
+    enable_voice = args.voice or args.agent or args.direct_voice
     app = BimoSimulatorApp(
         backend=backend,
         enable_voice=enable_voice,
         enable_agent=args.agent,
+        mock_llm=args.mock_llm,
+        direct_voice=args.direct_voice,
     )
     app.run()
 

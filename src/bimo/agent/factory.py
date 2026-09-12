@@ -22,6 +22,7 @@ from bimo.tools.robot_tools import (
     RobotSetFaceTool,
     RobotSpeakTool,
 )
+from bimo.tools.web_tools import WebFetchTool, WebSearchTool
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +32,13 @@ def create_default_tool_registry(
     state_machine: RobotStateMachine | None = None,
     event_bus: EventBus | None = None,
 ) -> ToolRegistry:
-    """Create a ToolRegistry populated with the standard Phase 6 safe robot tools."""
+    """Create a ToolRegistry populated with the standard safe robot and web tools."""
     registry = ToolRegistry()
     registry.register(RobotSpeakTool(tts=tts))
     registry.register(RobotSetFaceTool(state_machine=state_machine, event_bus=event_bus))
     registry.register(RobotGetStatusTool(state_machine=state_machine, tts=tts))
+    registry.register(WebSearchTool())
+    registry.register(WebFetchTool())
     return registry
 
 
@@ -63,6 +66,12 @@ def create_llm_provider(
             api_key=cfg.api_key,
             base_url=cfg.base_url,
         )
+
+    if cfg.provider.lower() in ("local", "offline", "conversational", "interactive"):
+        from bimo.agent.local_provider import LocalConversationalLLM
+
+        logger.info("Creating LocalConversationalLLM (offline interactive mode)")
+        return LocalConversationalLLM(model_name=cfg.model)
 
     logger.info(
         "Creating OmniRouteLLM provider (model: %s, endpoint: %s)",

@@ -233,3 +233,7 @@ def create_tts_provider(
             event_bus=event_bus,
         )
 
+
+# Alias for backward compatibility
+create_tts = create_tts_provider
+

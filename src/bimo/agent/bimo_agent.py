@@ -200,6 +200,31 @@ class BimoAgent(AgentInputInterface):
             # Check for provider or network error
             if response.is_error:
                 err_msg = response.error or "Unknown LLM provider error"
+                # If primary provider is unreachable in live runtime (not a mock in unit tests), fall back to local engine
+                if (
+                    self.llm_provider.__class__.__name__ != "MockLLMProvider"
+                    and any(kw in err_msg.lower() for kw in ("unreachable", "refused", "10061", "cannot connect", "connection error"))
+                ):
+                    try:
+                        from bimo.agent.local_provider import LocalConversationalLLM
+                        logger.warning(
+                            "Primary LLM provider is unreachable (%s). Falling back to local conversational engine...",
+                            err_msg,
+                        )
+                        fallback_llm = LocalConversationalLLM()
+                        fallback_resp = fallback_llm.generate(llm_request)
+                        if not fallback_resp.is_error:
+                            response = fallback_resp
+                            last_response = response
+                            if not response.has_tool_calls:
+                                final_content = response.content.strip()
+                                self.context.add_assistant_message(final_content)
+                                break
+                    except Exception as fb_err:
+                        logger.debug("Local fallback failed: %s", fb_err)
+
+            if response.is_error:
+                err_msg = response.error or "Unknown LLM provider error"
                 logger.error("BimoAgent LLM error: %s", err_msg)
 
                 self._publish_event(

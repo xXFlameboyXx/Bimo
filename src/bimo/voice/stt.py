@@ -270,7 +270,7 @@ class WhisperSTT(BaseSpeechToText):
             )
 
         # Normalize PCM amplitude to boost signal-to-noise ratio on quiet microphones
-        norm_pcm = normalize_pcm(audio_data, target_peak=22000, max_gain=30.0)
+        norm_pcm = normalize_pcm(audio_data, target_peak=22000, max_gain=4.0, noise_floor_peak=350.0)
 
         # Ensure audio byte length is even for 16-bit PCM
         if len(norm_pcm) % 2 != 0:
@@ -322,7 +322,7 @@ class WhisperSTT(BaseSpeechToText):
                 task="transcribe",
                 initial_prompt=self.initial_prompt,
                 condition_on_previous_text=False,
-                vad_filter=False,  # External VAD is handled by Bimo VoiceService
+                vad_filter=True,  # Silero VAD filtering eliminates background hallucinations
             )
 
             # Concatenate segment texts

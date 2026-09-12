@@ -274,12 +274,14 @@ class RobotStateMachine:
                 )
 
             case EventType.SPEECH_OUTPUT_STARTED:
+                if current == RobotState.ERROR:
+                    return False
                 return self.transition_to(
                     RobotState.SPEAKING, reason="Speech output started"
                 )
 
             case EventType.SPEECH_OUTPUT_FINISHED | EventType.SPEECH_OUTPUT_CANCELLED:
-                if current == RobotState.SPEAKING:
+                if current in (RobotState.SPEAKING, RobotState.ERROR):
                     return self.transition_to(
                         RobotState.IDLE, reason="Speech output finished"
                     )

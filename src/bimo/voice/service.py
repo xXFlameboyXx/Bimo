@@ -69,6 +69,14 @@ class VoiceService:
         if self.wake_word_detector and self.event_bus:
             self.wake_word_detector.attach_event_bus(self.event_bus)
 
+        self._is_self_speaking = False
+        if self.event_bus:
+            self.event_bus.subscribe(EventType.WAKE_WORD_DETECTED, self._on_wake_word_event)
+            self.event_bus.subscribe(EventType.SPEECH_OUTPUT_STARTED, self._on_speech_output_started)
+            self.event_bus.subscribe(EventType.SPEECH_OUTPUT_FINISHED, self._on_speech_output_finished)
+            self.event_bus.subscribe(EventType.SPEECH_OUTPUT_CANCELLED, self._on_speech_output_finished)
+            self.event_bus.subscribe(EventType.SPEECH_OUTPUT_ERROR, self._on_speech_output_finished)
+
         self._is_running = False
         self._worker_thread: threading.Thread | None = None
         self._stop_event = threading.Event()
@@ -91,6 +99,46 @@ class VoiceService:
         chunk_duration = float(microphone.chunk_size) / float(microphone.sample_rate)
         preroll_count = max(4, int(math.ceil(preroll_duration / chunk_duration)))
         self._preroll_buffer: collections.deque[bytes] = collections.deque(maxlen=preroll_count)
+
+    def _on_wake_word_event(self, event: Event) -> None:
+        """Respond to externally triggered wake word events (e.g. keyboard UI, remote client)."""
+        if event.source == "voice_service":
+            return
+        if self._is_running and self._stage == VoicePipelineStage.WAITING_FOR_WAKE_WORD and not self._is_self_speaking:
+            logger.info("External wake word trigger from '%s'. Starting speech capture.", event.source)
+            self.trigger_wake_word(model_name=str(event.data.get("keyword", "external")))
+
+    def _on_speech_output_started(self, event: Event) -> None:
+        """Acoustic echo cancellation: mute mic capture while robot is vocalizing."""
+        with self._lock:
+            self._is_self_speaking = True
+            self._speech_buffer.clear()
+            self._preroll_buffer.clear()
+            self.vad.reset()
+            if self._stage == VoicePipelineStage.CAPTURING_SPEECH:
+                self._stage = (
+                    VoicePipelineStage.WAITING_FOR_WAKE_WORD
+                    if self.wake_word_detector is not None
+                    else VoicePipelineStage.WAITING_FOR_WAKE_WORD
+                )
+        logger.debug("VoiceService: Robot speaking; muted mic capture to prevent self-trigger.")
+
+    def _on_speech_output_finished(self, event: Event) -> None:
+        """Unmute mic capture and flush reverberation after robot vocalization finishes."""
+        def _delayed_unmute() -> None:
+            time.sleep(0.18)  # Let speaker audio dissipate in the room
+            with self._lock:
+                self._is_self_speaking = False
+                try:
+                    self.microphone.flush()
+                except Exception:
+                    pass
+                self._speech_buffer.clear()
+                self._preroll_buffer.clear()
+                self.vad.reset()
+            logger.debug("VoiceService: Robot finished speaking; unmuted mic capture.")
+
+        threading.Thread(target=_delayed_unmute, daemon=True).start()
 
     @property
     def is_running(self) -> bool:
@@ -167,11 +215,15 @@ class VoiceService:
     def trigger_wake_word(self, model_name: str = "manual_trigger") -> None:
         """Manually trigger wake-word activation (useful for testing and UI events)."""
         now = time.time()
-        self._stage = VoicePipelineStage.CAPTURING_SPEECH
-        self._capture_start_time = now
-        self._user_spoke_in_capture = False
-        self._speech_buffer.clear()
-        self.vad.reset()
+        with self._lock:
+            self._stage = VoicePipelineStage.CAPTURING_SPEECH
+            self._capture_start_time = now
+            self._user_spoke_in_capture = False
+            self._speech_buffer.clear()
+            for p in self._preroll_buffer:
+                self._speech_buffer.extend(p)
+            self._preroll_buffer.clear()
+            self.vad.reset()
 
         self._publish_event(
             EventType.WAKE_WORD_DETECTED,
@@ -202,7 +254,7 @@ class VoiceService:
                 time.sleep(0.2)
                 continue
 
-            if not chunk:
+            if not chunk or self._is_self_speaking:
                 continue
 
             now = time.time()

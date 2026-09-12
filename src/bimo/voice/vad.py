@@ -56,24 +56,27 @@ class EnergyVAD:
 
     Tracks consecutive speech frames to confirm voice activity start, and
     consecutive silence frames to confirm speech completion.
+    Features dynamic noise floor tracking to prevent room noise false triggers.
     """
 
     def __init__(
         self,
-        energy_threshold: float = 110.0,
-        speech_time_threshold: float = 0.04,
-        silence_time_threshold: float = 1.25,
-        continue_threshold_ratio: float = 0.50,
+        energy_threshold: float = 450.0,
+        speech_time_threshold: float = 0.06,
+        silence_time_threshold: float = 1.0,
+        continue_threshold_ratio: float = 0.60,
         sample_rate: int = 16000,
         chunk_size: int = 1024,
+        adaptive_noise_floor: bool = True,
     ) -> None:
         self.energy_threshold = energy_threshold
-        # Hysteresis: speech continuation threshold (50% of onset threshold) prevents dropping soft trailing words
+        self.continue_threshold_ratio = continue_threshold_ratio
         self.continue_energy_threshold = energy_threshold * continue_threshold_ratio
         self.speech_time_threshold = speech_time_threshold
         self.silence_time_threshold = silence_time_threshold
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
+        self.adaptive_noise_floor = adaptive_noise_floor
 
         # Duration of a single chunk in seconds
         self.chunk_duration = float(chunk_size) / float(sample_rate)
@@ -82,11 +85,17 @@ class EnergyVAD:
         self._is_speaking = False
         self._consecutive_speech_sec = 0.0
         self._consecutive_silence_sec = 0.0
+        self._noise_floor: float = 80.0
 
     @property
     def is_speaking(self) -> bool:
         """Return whether voice activity is currently deemed ongoing."""
         return self._is_speaking
+
+    @property
+    def noise_floor(self) -> float:
+        """Return current estimated ambient noise floor RMS."""
+        return self._noise_floor
 
     def reset(self) -> None:
         """Reset internal speech/silence tracking counters."""
@@ -102,8 +111,14 @@ class EnergyVAD:
         activity_stopped = False
 
         if not self._is_speaking:
-            # When IDLE, evaluate against onset threshold
-            is_speech = energy >= self.energy_threshold
+            # During non-speech, adaptively track ambient room noise
+            if self.adaptive_noise_floor and energy < (self.energy_threshold * 1.5):
+                self._noise_floor = 0.92 * self._noise_floor + 0.08 * energy
+
+            # When IDLE, evaluate against onset threshold (must exceed both base and dynamic floor)
+            onset_threshold = max(self.energy_threshold, self._noise_floor * 2.2)
+            is_speech = energy >= onset_threshold
+
             if is_speech:
                 self._consecutive_speech_sec += self.chunk_duration
                 self._consecutive_silence_sec = 0.0
@@ -111,13 +126,19 @@ class EnergyVAD:
                 if self._consecutive_speech_sec >= self.speech_time_threshold:
                     self._is_speaking = True
                     activity_started = True
-                    logger.debug("VAD: Voice activity started (RMS: %.1f)", energy)
+                    logger.debug(
+                        "VAD: Voice activity started (RMS: %.1f, threshold: %.1f)",
+                        energy,
+                        onset_threshold,
+                    )
             else:
                 self._consecutive_speech_sec = 0.0
                 self._consecutive_silence_sec += self.chunk_duration
         else:
-            # While SPEAKING, use lower continue_threshold so soft trailing words/consonants are not cut off
-            is_speech = energy >= self.continue_energy_threshold
+            # While SPEAKING, use hysteresis threshold so soft trailing words/consonants are not cut off
+            continue_threshold = max(self.continue_energy_threshold, self._noise_floor * 1.3)
+            is_speech = energy >= continue_threshold
+
             if is_speech:
                 self._consecutive_silence_sec = 0.0
                 self._consecutive_speech_sec += self.chunk_duration
