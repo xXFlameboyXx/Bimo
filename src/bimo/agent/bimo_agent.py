@@ -53,7 +53,7 @@ class BimoAgent(AgentInputInterface):
         tool_registry: ToolRegistry | None = None,
         permission_policy: PermissionPolicy | None = None,
         tools_enabled: bool = True,
-        max_tool_iterations: int = 8,
+        max_tool_iterations: int = 50,
         auto_speak: bool = True,
         fallback_error_message: str = DEFAULT_FALLBACK_ERROR,
     ) -> None:
@@ -73,6 +73,9 @@ class BimoAgent(AgentInputInterface):
         self._lock = threading.RLock()
         self._last_processed_text: str | None = None
         self._last_processed_time: float = 0.0
+        self._last_completed_time: float = 0.0
+        self._is_processing: bool = False
+        self._last_utterance_id: str | None = None
 
         # Auto-subscribe to central event bus if provided
         if self.event_bus:
@@ -107,11 +110,66 @@ class BimoAgent(AgentInputInterface):
         if not transcript:
             return
 
-        # Deduplicate if receive_user_input was also invoked directly in same tick
+        # Check for urgent spoken interruption regardless of whether agent is processing
+        from bimo.agent.cancellation import TaskInterruptManager, InterruptCommand
+        cmd = TaskInterruptManager.classify(transcript)
+        if cmd in (InterruptCommand.STOP, InterruptCommand.CANCEL, InterruptCommand.ABORT):
+            logger.info("BimoAgent received urgent interruption command: '%s'. Stopping TTS and resetting.", transcript)
+            if self.tts:
+                self.tts.stop()
+            if getattr(self, "_active_cancel_token", None):
+                self._active_cancel_token.cancel("User interrupted")
+            if self.state_machine:
+                self.state_machine.transition_to(RobotState.IDLE, reason="User interrupted", force=True)
+            self._publish_event(EventType.SPEECH_OUTPUT_CANCELLED, {"reason": "User interrupted", "transcript": transcript})
+            with self._lock:
+                self._is_processing = False
+                self._active_cancel_token = None
+            return
+        elif cmd == InterruptCommand.PAUSE or transcript.lower() in ("wait", "pause", "hold on", "bimo wait"):
+            logger.info("BimoAgent received pause command: '%s'. Pausing task and TTS.", transcript)
+            if self.tts:
+                self.tts.stop()
+            if getattr(self, "_active_cancel_token", None):
+                self._active_cancel_token.pause()
+            if self.state_machine:
+                self.state_machine.transition_to(RobotState.IDLE, reason="User paused", force=True)
+            self._publish_event(EventType.TASK_PAUSED, {"reason": "User paused", "transcript": transcript})
+            if self.auto_speak and self.tts:
+                self.tts.speak("Waiting.", block=False)
+            return
+        elif cmd in (InterruptCommand.RESUME, InterruptCommand.CONTINUE) or transcript.lower() in ("continue", "resume", "bimo continue"):
+            logger.info("BimoAgent received resume command: '%s'. Resuming task.", transcript)
+            if getattr(self, "_active_cancel_token", None):
+                self._active_cancel_token.resume()
+            if self.state_machine:
+                self.state_machine.transition_to(RobotState.EXECUTING, reason="User resumed", force=True)
+            self._publish_event(EventType.TASK_RESUMED, {"reason": "User resumed", "transcript": transcript})
+            if self.auto_speak and self.tts:
+                self.tts.speak("Continuing.", block=False)
+            return
+
         now = time.time()
+        utterance_id = event.data.get("utterance_id")
         with self._lock:
-            if transcript == self._last_processed_text and (now - self._last_processed_time) < 1.0:
+            # 1. Do not start a new turn if one is already actively being processed
+            if self._is_processing:
+                logger.debug("Dropping SPEECH_RECEIVED '%s': agent is currently busy processing", transcript)
                 return
+            # 2. Deduplicate if this exact utterance ID was already received
+            if utterance_id and utterance_id == self._last_utterance_id:
+                logger.debug("Dropping duplicate utterance ID '%s'", utterance_id)
+                return
+            # 3. Deduplicate if same text was completed within cooldown window (5.0s)
+            if transcript == self._last_processed_text and (now - self._last_completed_time) < 5.0:
+                logger.debug("Dropping duplicate SPEECH_RECEIVED '%s' received within cooldown", transcript)
+                return
+            # Atomically lock processing state before yielding lock
+            self._is_processing = True
+            self._last_processed_text = transcript
+            self._last_processed_time = now
+            if utterance_id:
+                self._last_utterance_id = utterance_id
 
         logger.debug("BimoAgent received SPEECH_RECEIVED event: '%s'", transcript)
         self.process_turn(transcript, metadata=event.data)
@@ -124,10 +182,66 @@ class BimoAgent(AgentInputInterface):
         if not clean_text:
             return
 
+        # Check for urgent spoken interruption regardless of whether agent is processing
+        from bimo.agent.cancellation import TaskInterruptManager, InterruptCommand
+        cmd = TaskInterruptManager.classify(clean_text)
+        if cmd in (InterruptCommand.STOP, InterruptCommand.CANCEL, InterruptCommand.ABORT):
+            logger.info("BimoAgent received urgent interruption command: '%s'. Stopping TTS and resetting.", clean_text)
+            if self.tts:
+                self.tts.stop()
+            if getattr(self, "_active_cancel_token", None):
+                self._active_cancel_token.cancel("User interrupted")
+            if self.state_machine:
+                self.state_machine.transition_to(RobotState.IDLE, reason="User interrupted", force=True)
+            self._publish_event(EventType.SPEECH_OUTPUT_CANCELLED, {"reason": "User interrupted", "transcript": clean_text})
+            with self._lock:
+                self._is_processing = False
+                self._active_cancel_token = None
+            return
+        elif cmd == InterruptCommand.PAUSE or clean_text.lower() in ("wait", "pause", "hold on", "bimo wait"):
+            logger.info("BimoAgent received pause command: '%s'. Pausing task and TTS.", clean_text)
+            if self.tts:
+                self.tts.stop()
+            if getattr(self, "_active_cancel_token", None):
+                self._active_cancel_token.pause()
+            if self.state_machine:
+                self.state_machine.transition_to(RobotState.IDLE, reason="User paused", force=True)
+            self._publish_event(EventType.TASK_PAUSED, {"reason": "User paused", "transcript": clean_text})
+            if self.auto_speak and self.tts:
+                self.tts.speak("Waiting.", block=False)
+            return
+        elif cmd in (InterruptCommand.RESUME, InterruptCommand.CONTINUE) or clean_text.lower() in ("continue", "resume", "bimo continue"):
+            logger.info("BimoAgent received resume command: '%s'. Resuming task.", clean_text)
+            if getattr(self, "_active_cancel_token", None):
+                self._active_cancel_token.resume()
+            if self.state_machine:
+                self.state_machine.transition_to(RobotState.EXECUTING, reason="User resumed", force=True)
+            self._publish_event(EventType.TASK_RESUMED, {"reason": "User resumed", "transcript": clean_text})
+            if self.auto_speak and self.tts:
+                self.tts.speak("Continuing.", block=False)
+            return
+
         now = time.time()
+        utterance_id = metadata.get("utterance_id") if metadata else None
         with self._lock:
-            if clean_text == self._last_processed_text and (now - self._last_processed_time) < 1.0:
+            # 1. Do not start a new turn if one is already actively being processed
+            if self._is_processing:
+                logger.debug("Dropping receive_user_input '%s': agent is currently busy processing", clean_text)
                 return
+            # 2. Deduplicate if this exact utterance ID was already received
+            if utterance_id and utterance_id == self._last_utterance_id:
+                logger.debug("Dropping duplicate utterance ID '%s'", utterance_id)
+                return
+            # 3. Deduplicate if same text was completed within cooldown window (5.0s)
+            if clean_text == self._last_processed_text and (now - self._last_completed_time) < 5.0:
+                logger.debug("Dropping duplicate receive_user_input '%s' received within cooldown", clean_text)
+                return
+            # Atomically lock processing state before yielding lock
+            self._is_processing = True
+            self._last_processed_text = clean_text
+            self._last_processed_time = now
+            if utterance_id:
+                self._last_utterance_id = utterance_id
 
         self.process_turn(clean_text, metadata=metadata)
 
@@ -149,10 +263,15 @@ class BimoAgent(AgentInputInterface):
         """
         clean_text = user_text.strip()
         now = time.time()
-
+        utterance_id = metadata.get("utterance_id") if metadata else None
+        cancel_token = metadata.get("cancel_token") if metadata else None
         with self._lock:
+            self._is_processing = True
+            self._active_cancel_token = cancel_token
             self._last_processed_text = clean_text
             self._last_processed_time = now
+            if utterance_id:
+                self._last_utterance_id = utterance_id
             self._history.append({
                 "text": clean_text,
                 "timestamp": now,
@@ -160,6 +279,32 @@ class BimoAgent(AgentInputInterface):
             })
 
         logger.info("BimoAgent processing user query: '%s'", clean_text)
+
+        from bimo.agent.cancellation import TaskCancelledException
+        try:
+            return self._execute_turn(clean_text, metadata=metadata)
+        except TaskCancelledException as exc:
+            logger.info("BimoAgent turn cancelled: %s", exc)
+            if self.tts:
+                self.tts.stop()
+            if self.state_machine:
+                self.state_machine.transition_to(RobotState.IDLE, reason="Task cancelled", force=True)
+            self._publish_event(
+                EventType.SPEECH_OUTPUT_CANCELLED,
+                {"reason": "cancelled", "transcript": clean_text},
+            )
+            return LLMResponse(content="Stopped.", raw={"cancelled": True})
+        finally:
+            with self._lock:
+                self._last_completed_time = time.time()
+                self._is_processing = False
+                self._active_cancel_token = None
+
+    def _execute_turn(
+        self, clean_text: str, metadata: dict[str, Any] | None = None
+    ) -> LLMResponse:
+        """Internal execution loop for process_turn."""
+        cancel_token = metadata.get("cancel_token") if metadata else self._active_cancel_token
 
         # Transition state machine to THINKING
         if self.state_machine and self.state_machine.current_state != RobotState.THINKING:
@@ -187,8 +332,12 @@ class BimoAgent(AgentInputInterface):
         final_content = ""
         last_response: LLMResponse | None = None
         computer_use_active = False
+        spoke_via_tool = False
 
         while iterations < self.max_tool_iterations:
+            if cancel_token:
+                cancel_token.check_cancelled()
+                cancel_token.wait_if_paused()
             # Build standardized LLMRequest
             messages = self.context.get_messages()
             llm_request = LLMRequest(messages=messages, tools=tools_schema)
@@ -305,6 +454,10 @@ class BimoAgent(AgentInputInterface):
 
             # Execute each requested tool in order
             for tc in response.tool_calls:
+                if cancel_token:
+                    cancel_token.check_cancelled()
+                    cancel_token.wait_if_paused()
+
                 if tc.name.startswith("pc."):
                     self._publish_event(
                         EventType.PC_COMPUTER_USE_STEP,
@@ -345,6 +498,8 @@ class BimoAgent(AgentInputInterface):
                             {"tool": tc.name, "error": tool_result.error},
                         )
                 else:
+                    if tc.name == "robot.speak":
+                        spoke_via_tool = True
                     self._publish_event(
                         EventType.TOOL_EXECUTION_COMPLETED,
                         {
@@ -423,7 +578,7 @@ class BimoAgent(AgentInputInterface):
         )
 
         # Dispatch speech response through TextToSpeech abstraction
-        if self.auto_speak and self.tts and final_content:
+        if self.auto_speak and self.tts and final_content and not spoke_via_tool:
             logger.info("BimoAgent speaking response (%d chars)", len(final_content))
             self.tts.speak(final_content, block=False)
 
@@ -444,5 +599,9 @@ class BimoAgent(AgentInputInterface):
         with self._lock:
             self._history.clear()
             self._last_processed_text = None
+            self._last_processed_time = 0.0
+            self._last_completed_time = 0.0
+            self._last_utterance_id = None
+            self._is_processing = False
             self.context.clear()
             logger.info("BimoAgent context cleared.")

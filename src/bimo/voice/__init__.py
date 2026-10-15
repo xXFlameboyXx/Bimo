@@ -23,6 +23,11 @@ from bimo.voice.microphone import (
     PCMicrophone,
     RaspberryPiMicrophone,
 )
+from bimo.voice.normalizer import (
+    contains_wake_word,
+    extract_command_after_wake_word,
+    normalize_phonetic_text,
+)
 from bimo.voice.service import VoicePipelineStage, VoiceService
 from bimo.voice.stt import GoogleWebSTT, LocalWhisperSTT, MockSpeechToText, WhisperSTT, normalize_pcm
 from bimo.voice.tts import MockTTS, PiperTTS, RaspberryPiTTS, WindowsTTS
@@ -52,6 +57,9 @@ __all__ = [
     "GoogleWebSTT",
     "MockSpeechToText",
     "normalize_pcm",
+    "normalize_phonetic_text",
+    "contains_wake_word",
+    "extract_command_after_wake_word",
     # TTS Providers
     "PiperTTS",
     "WindowsTTS",

@@ -1,0 +1,10 @@
+Phase,Module,Platform,Status
+Phase 0-1,Face Simulator & State Machine,Cross-Platform,Complete
+Phase 2,Physical LCD Driver (ILI9486),Raspberry Pi,Complete
+Phase 3,Voice Input (Whisper),Raspberry Pi,Complete
+Phase 4,Speech Output (Piper),Raspberry Pi,Complete
+Phase 5,LLM Reasoning (OmniRoute),Local Hub,Complete
+Phase 6,Deterministic Tool Registry,Cross-Platform,Complete
+Phase 7,Windows PC Agent,Windows,Complete
+Phase 8,Controlled Computer Use,Windows & Hub,Complete
+Refinement,Artifact & File Creation,Cross-Platform,Complete

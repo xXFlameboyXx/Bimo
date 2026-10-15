@@ -78,7 +78,7 @@ class LLMConfig:
     temperature: float = 0.7
     max_history: int = 20
     tools_enabled: bool = True
-    max_tool_iterations: int = 8
+    max_tool_iterations: int = 50
 
 
 @dataclass(frozen=True)
@@ -92,20 +92,46 @@ class PCAgentConfig:
     connect_timeout: float = 3.0
     request_timeout: float = 10.0
     max_clock_skew: float = 30.0
-    allowed_apps: tuple[str, ...] = ("notepad", "calculator", "explorer")
+    allowed_apps: tuple[str, ...] = ("notepad", "calculator", "explorer", "youtube")
 
     # Phase 8: Controlled Computer Use settings
     computer_use_enabled: bool = True
-    max_computer_use_steps: int = 12
+    max_computer_use_steps: int = 50
     screenshot_max_width: int = 1920
     screenshot_max_height: int = 1080
     screenshot_max_bytes: int = 1_500_000
     max_type_text_length: int = 1000
     max_scroll: int = 1000
+    auto_confirm: bool = False
+    application_discovery: bool = True
+    application_allowlist_mode: bool = False
 
 
 # Backward compatibility alias
 LaptopConfig = PCAgentConfig
+
+
+@dataclass(frozen=True)
+class ArtifactConfig:
+    """Artifact and file generation configuration."""
+
+    workspace_dir: str = "artifacts"
+    max_artifact_size_mb: int = 25
+    max_text_size_mb: int = 5
+    max_image_size_mb: int = 15
+    auto_confirm: bool = False
+
+
+@dataclass(frozen=True)
+class ImageConfig:
+    """Image generation provider configuration."""
+
+    provider: str = "omniroute"  # "omniroute", "local", "mock", "none"
+    base_url: str = "http://localhost:20128"
+    model: str = "antigravity/gemini-3.1-flash-image"
+    api_key: str = ""
+    timeout_seconds: float = 60.0
+    enabled: bool = True
 
 
 @dataclass(frozen=True)
@@ -126,6 +152,7 @@ class AudioConfig:
     audio_input: str = "pc"  # "pc", "mock", "pi"
     audio_output: str = "windows"  # "windows", "mock", "pi"
     stt_provider: str = "whisper"  # "whisper", "google", "mock"
+    stt_language: str = "en-US"  # Language code for STT e.g. "en-US", "en-IN"
     tts_provider: str = "piper"  # "piper", "windows", "mock", "pi"
     whisper_model: str = "tiny.en"
     whisper_model_path: str | None = None
@@ -134,6 +161,8 @@ class AudioConfig:
     wake_word_model: str = "hey_jarvis"
     wake_word_threshold: float = 0.5
     wake_word_cooldown: float = 1.5
+    require_wake_word: bool = True  # If true, strictly ignore speech without wake words
+    hybrid_wake_word: bool = True  # Enable transcript-level wake word gating alongside acoustic
     speech_timeout: float = 5.0
     max_speech_duration: float = 10.0
     piper_model_path: str | None = None
@@ -150,6 +179,8 @@ class AudioConfig:
     silence_seconds: float = 1.25
     speech_threshold_seconds: float = 0.04
     device_index: int | str | None = None
+    custom_vocabulary: tuple[str, ...] = ("Bimo", "paneer", "despacito", "gaana", "chalao")
+    vocab_replacements: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -163,6 +194,8 @@ class Config:
     llm: LLMConfig = field(default_factory=LLMConfig)
     laptop: PCAgentConfig = field(default_factory=PCAgentConfig)
     pc_agent: PCAgentConfig = field(default_factory=PCAgentConfig)
+    artifacts: ArtifactConfig = field(default_factory=ArtifactConfig)
+    image: ImageConfig = field(default_factory=ImageConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
 
     @classmethod
@@ -175,8 +208,11 @@ class Config:
         else:
             # Default search: check cwd/.env or root directory/.env
             candidate = Path(".env")
+            candidate_root = Path(__file__).resolve().parent.parent.parent.parent / ".env"
             if candidate.exists():
                 env_dict.update(load_dotenv(candidate))
+            elif candidate_root.exists():
+                env_dict.update(load_dotenv(candidate_root))
 
         def get_val(key: str, default: Any) -> Any:
             # OS environment variables take precedence over .env file
@@ -227,7 +263,7 @@ class Config:
             temperature=get_float("LLM_TEMPERATURE", 0.7),
             max_history=get_int("LLM_MAX_HISTORY", 20),
             tools_enabled=get_bool("TOOLS_ENABLED", True),
-            max_tool_iterations=get_int("MAX_TOOL_ITERATIONS", 8),
+            max_tool_iterations=get_int("MAX_TOOL_ITERATIONS", 50),
         )
 
         # Parse PC / Laptop agent settings
@@ -246,18 +282,22 @@ class Config:
         pc_request_timeout = get_float("PC_AGENT_REQUEST_TIMEOUT", 10.0)
         pc_max_clock_skew = get_float("PC_AGENT_MAX_CLOCK_SKEW", 30.0)
 
-        apps_val = get_val("PC_ALLOWED_APPS", "notepad,calculator,explorer")
+        apps_val = get_val("PC_ALLOWED_APPS", "notepad,calculator,explorer,youtube")
         allowed_apps = tuple(
             a.strip().lower() for a in str(apps_val).split(",") if a.strip()
         )
 
         cu_enabled = get_bool("COMPUTER_USE_ENABLED", True)
-        max_cu_steps = get_int("MAX_COMPUTER_USE_STEPS", 12)
+        max_cu_steps = get_int("MAX_COMPUTER_USE_STEPS", 50)
         ss_max_w = get_int("PC_SCREENSHOT_MAX_WIDTH", 1920)
         ss_max_h = get_int("PC_SCREENSHOT_MAX_HEIGHT", 1080)
         ss_max_b = get_int("PC_SCREENSHOT_MAX_BYTES", 1_500_000)
         max_type_len = get_int("PC_MAX_TYPE_TEXT_LENGTH", 1000)
         max_sc = get_int("PC_MAX_SCROLL", 1000)
+        pc_auto_confirm = get_bool("PC_AUTO_CONFIRM", get_bool("AUTO_CONFIRM", False))
+
+        app_discovery = get_bool("PC_APPLICATION_DISCOVERY", True)
+        app_allowlist_mode = get_bool("PC_APPLICATION_ALLOWLIST_MODE", False)
 
         laptop = PCAgentConfig(
             enabled=pc_enabled,
@@ -275,6 +315,9 @@ class Config:
             screenshot_max_bytes=ss_max_b,
             max_type_text_length=max_type_len,
             max_scroll=max_sc,
+            auto_confirm=pc_auto_confirm,
+            application_discovery=app_discovery,
+            application_allowlist_mode=app_allowlist_mode,
         )
 
         logging_cfg = LoggingConfig(
@@ -310,6 +353,7 @@ class Config:
             audio_input=str(get_val("AUDIO_INPUT", "pc")).lower(),
             audio_output=str(get_val("AUDIO_OUTPUT", "windows")).lower(),
             stt_provider=str(get_val("STT_PROVIDER", "whisper")).lower(),
+            stt_language=str(get_val("STT_LANGUAGE", "en-US")),
             tts_provider=str(get_val("TTS_PROVIDER", "piper")).lower(),
             whisper_model=str(get_val("WHISPER_MODEL", "tiny.en")),
             whisper_model_path=get_val("WHISPER_MODEL_PATH", None),
@@ -318,6 +362,8 @@ class Config:
             wake_word_model=primary_wake_word_model,
             wake_word_threshold=get_float("WAKE_WORD_THRESHOLD", 0.5),
             wake_word_cooldown=get_float("WAKE_WORD_COOLDOWN", 1.5),
+            require_wake_word=get_bool("REQUIRE_WAKE_WORD", True),
+            hybrid_wake_word=get_bool("HYBRID_WAKE_WORD", True),
             speech_timeout=get_float("SPEECH_TIMEOUT", 5.0),
             max_speech_duration=get_float("MAX_SPEECH_DURATION", 10.0),
             piper_model_path=get_val("PIPER_MODEL_PATH", None),
@@ -334,6 +380,33 @@ class Config:
             silence_seconds=get_float("AUDIO_SILENCE_SECONDS", 1.25),
             speech_threshold_seconds=get_float("AUDIO_SPEECH_THRESHOLD", 0.04),
             device_index=get_val("AUDIO_DEVICE_INDEX", None),
+            custom_vocabulary=tuple(
+                w.strip()
+                for w in str(
+                    get_val(
+                        "CUSTOM_VOCABULARY",
+                        "Bimo, paneer, despacito, gaana, chalao, gaane, sunao, namaste",
+                    )
+                ).split(",")
+                if w.strip()
+            ),
+        )
+
+        artifact_cfg = ArtifactConfig(
+            workspace_dir=str(get_val("BIMO_ARTIFACT_DIR", "artifacts")),
+            max_artifact_size_mb=get_int("MAX_ARTIFACT_SIZE_MB", 25),
+            max_text_size_mb=get_int("MAX_TEXT_ARTIFACT_SIZE_MB", 5),
+            max_image_size_mb=get_int("MAX_IMAGE_SIZE_MB", 15),
+            auto_confirm=get_bool("ARTIFACT_AUTO_CONFIRM", False),
+        )
+
+        image_cfg = ImageConfig(
+            provider=str(get_val("IMAGE_PROVIDER", "omniroute")).lower(),
+            base_url=str(get_val("IMAGE_API_BASE_URL", "http://localhost:20128")),
+            model=str(get_val("IMAGE_MODEL", "antigravity/gemini-3.1-flash-image")),
+            api_key=str(get_val("IMAGE_API_KEY", "")),
+            timeout_seconds=get_float("IMAGE_TIMEOUT_SECONDS", 60.0),
+            enabled=get_bool("IMAGE_GENERATION_ENABLED", True),
         )
 
         return cls(
@@ -344,5 +417,7 @@ class Config:
             llm=llm,
             laptop=laptop,
             pc_agent=laptop,
+            artifacts=artifact_cfg,
+            image=image_cfg,
             logging=logging_cfg,
         )

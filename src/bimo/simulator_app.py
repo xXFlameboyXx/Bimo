@@ -47,21 +47,16 @@ class BimoSimulatorApp:
     ) -> None:
         self.direct_voice = direct_voice
         self.config = Config.from_env()
-        if mock_llm:
-            from bimo.core.config import LLMConfig
+        from dataclasses import replace
 
-            self.config = Config(
-                robot_name=self.config.robot_name,
-                environment=self.config.environment,
-                display=self.config.display,
-                audio=self.config.audio,
-                llm=LLMConfig(
+        if mock_llm:
+            self.config = replace(
+                self.config,
+                llm=replace(
+                    self.config.llm,
                     provider="local",
                     model="bimo-local-conversational",
                 ),
-                laptop=self.config.laptop,
-                pc_agent=self.config.pc_agent,
-                logging=self.config.logging,
             )
         if backend:
             is_phys = backend.lower() in ("physical_lcd", "fb", "ili9486", "spi_ili9486")
@@ -69,21 +64,14 @@ class BimoSimulatorApp:
             def_h = 320 if is_phys else 480
             w = def_w if self.config.display.width in (800, 480) else self.config.display.width
             h = def_h if self.config.display.height in (480, 320) else self.config.display.height
-            self.config = Config(
-                robot_name=self.config.robot_name,
-                environment=self.config.environment,
-                display=DisplayConfig(
+            self.config = replace(
+                self.config,
+                display=replace(
+                    self.config.display,
                     width=w,
                     height=h,
                     backend=backend.lower(),
-                    fb_device=self.config.display.fb_device,
-                    idle_rotation_seconds=self.config.display.idle_rotation_seconds,
-                    idle_subcategories=self.config.display.idle_subcategories,
                 ),
-                audio=self.config.audio,
-                llm=self.config.llm,
-                laptop=self.config.laptop,
-                logging=self.config.logging,
             )
 
         self.event_bus = EventBus()
@@ -108,43 +96,38 @@ class BimoSimulatorApp:
         self.tts = None
         self.tool_registry = None
 
+        self.orchestrator = None
         if enable_agent:
             try:
-                from bimo.agent.factory import create_bimo_agent, create_default_tool_registry
+                from bimo.agent.factory import create_assistant_orchestrator
                 from bimo.voice.factory import create_tts
+                from bimo.tools.permissions import PermissionPolicy
 
                 self.tts = create_tts(self.config.audio, event_bus=self.event_bus)
-                self.tool_registry = create_default_tool_registry(
-                    tts=self.tts,
-                    state_machine=self.state_machine,
-                    event_bus=self.event_bus,
-                )
-                if self.config.pc_agent.enabled:
-                    try:
-                        from bimo.pc.client import PCAgentClient
-                        from bimo.pc.tools import register_pc_tools
-
-                        pc_client = PCAgentClient(self.config.pc_agent, event_bus=self.event_bus)
-                        register_pc_tools(self.tool_registry, pc_client)
-                    except Exception as pc_err:
-                        logger.warning("Could not register PC agent tools: %s", pc_err)
-
-                self.agent = create_bimo_agent(
+                policy = PermissionPolicy(auto_confirm=bool(self.config.pc_agent.auto_confirm))
+                self.orchestrator = create_assistant_orchestrator(
                     config=self.config,
                     tts=self.tts,
                     event_bus=self.event_bus,
                     state_machine=self.state_machine,
-                    tool_registry=self.tool_registry,
+                    permission_policy=policy,
                 )
-                logger.info("BimoAgent initialized with LLM, TTS, and tool registry.")
+                self.agent = self.orchestrator.agent
+                self.tool_registry = self.orchestrator.tool_registry
+                self.permission_policy = self.orchestrator.permission_policy
+                logger.info("AssistantOrchestrator and BimoAgent initialized with unified tool registry.")
             except Exception as exc:
-                logger.warning("Could not initialize BimoAgent: %s", exc)
+                logger.warning("Could not initialize AssistantOrchestrator: %s", exc)
 
         if enable_voice:
             try:
                 from bimo.voice import DefaultAgentInput, create_voice_service
+                from bimo.voice.agent_input import VoiceAdapter
 
-                self.agent_input = self.agent or DefaultAgentInput()
+                if getattr(self, "orchestrator", None) is not None:
+                    self.agent_input = VoiceAdapter(self.orchestrator)
+                else:
+                    self.agent_input = self.agent or DefaultAgentInput()
                 self.voice_service = create_voice_service(
                     config=self.config.audio,
                     event_bus=self.event_bus,
@@ -210,6 +193,27 @@ class BimoSimulatorApp:
                     self.renderer.display_status("Listening to you...")
                 elif event.type == EventType.VOICE_ACTIVITY_STOPPED:
                     self.renderer.display_status("Processing speech...")
+                elif event.type == EventType.SPEECH_IGNORED:
+                    raw_txt = event.data.get("transcript") or event.data.get("raw_transcript") or ""
+                    short_snippet = (raw_txt[:28] + "...") if len(raw_txt) > 28 else raw_txt
+                    self.renderer.display_status(f"Ignored (need 'Bimo'): '{short_snippet}'")
+
+                    def _reset_ignored() -> None:
+                        time.sleep(2.0)
+                        if self.state_machine.current_state == RobotState.LISTENING:
+                            self.state_machine.transition_to(
+                                RobotState.IDLE, reason="Ignored ambient speech"
+                            )
+
+                    threading.Thread(target=_reset_ignored, daemon=True).start()
+                elif event.type == EventType.TASK_CANCELLED:
+                    self.renderer.display_status("Stopped.")
+                elif event.type == EventType.TASK_PAUSED:
+                    self.renderer.display_status("Paused (Waiting...)")
+                elif event.type == EventType.TASK_RESUMED:
+                    self.renderer.display_status("Resuming...")
+                elif event.type == EventType.INTERRUPT_COMMAND_RECEIVED:
+                    self.renderer.display_status(f"Command: {event.data.get('command', 'INTERRUPT')}")
                 elif event.type == EventType.SPEECH_ERROR:
                     self.renderer.display_status(f"Speech error: {event.data.get('error', '')}")
 

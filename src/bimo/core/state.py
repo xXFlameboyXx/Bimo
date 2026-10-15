@@ -92,6 +92,9 @@ class RobotStateMachine:
             RobotState.IDLE,
             RobotState.SLEEPING,
             RobotState.LISTENING,
+            RobotState.THINKING,
+            RobotState.EXECUTING,
+            RobotState.SPEAKING,
         },
         RobotState.SLEEPING: {
             RobotState.IDLE,
@@ -261,6 +264,14 @@ class RobotStateMachine:
                 logger.debug("Voice activity stopped")
                 return False
 
+            case EventType.SPEECH_IGNORED:
+                if current == RobotState.LISTENING:
+                    reason = event.data.get("reason", "Speech ignored: no wake word")
+                    return self.transition_to(
+                        RobotState.IDLE, reason=f"Ignored: {reason}"
+                    )
+                return False
+
             case EventType.SPEECH_RECEIVED:
                 if current in (RobotState.LISTENING, RobotState.IDLE):
                     return self.transition_to(
@@ -338,6 +349,27 @@ class RobotStateMachine:
                     reason=f"Failed: {event.data.get('error', 'tool execution error')}",
                 )
 
+            case EventType.TASK_CANCELLED:
+                return self.transition_to(
+                    RobotState.IDLE,
+                    reason=f"Task cancelled: {event.data.get('reason', 'User interrupted')}",
+                    force=True,
+                )
+
+            case EventType.TASK_PAUSED:
+                return self.transition_to(
+                    RobotState.IDLE,
+                    reason=f"Task paused: {event.data.get('reason', 'User paused')}",
+                    force=True,
+                )
+
+            case EventType.TASK_RESUMED:
+                return self.transition_to(
+                    RobotState.EXECUTING,
+                    reason=f"Task resumed: {event.data.get('reason', 'User resumed')}",
+                    force=True,
+                )
+
             case EventType.LAPTOP_CONNECTED | EventType.PC_CONNECTED:
                 logger.info("PC / Laptop connected: %s", event.data.get("name", "pc"))
                 return False
@@ -372,6 +404,7 @@ class RobotStateMachine:
             EventType.VOICE_ACTIVITY_STOPPED,
             EventType.USER_SPEAKING,
             EventType.SPEECH_RECEIVED,
+            EventType.SPEECH_IGNORED,
             EventType.SPEECH_TRANSCRIPTION_STARTED,
             EventType.SPEECH_TRANSCRIPTION_COMPLETED,
             EventType.SPEECH_TRANSCRIPTION_ERROR,
@@ -388,6 +421,9 @@ class RobotStateMachine:
             EventType.TOOL_COMPLETED,
             EventType.TASK_COMPLETED,
             EventType.TASK_FAILED,
+            EventType.TASK_CANCELLED,
+            EventType.TASK_PAUSED,
+            EventType.TASK_RESUMED,
             EventType.TOOL_CALL_REQUESTED,
             EventType.TOOL_EXECUTION_STARTED,
             EventType.TOOL_EXECUTION_COMPLETED,

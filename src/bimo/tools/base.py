@@ -71,6 +71,7 @@ class ToolParameter:
     description: str
     required: bool = True
     enum_values: list[str] | None = None
+    items: dict[str, Any] | None = None
 
 
 class BaseTool(ABC):
@@ -112,6 +113,8 @@ class BaseTool(ABC):
             }
             if param.enum_values:
                 prop["enum"] = param.enum_values
+            if param.type == "array":
+                prop["items"] = param.items or {"type": "string"}
             properties[param.name] = prop
 
             if param.required:
@@ -140,7 +143,8 @@ class BaseTool(ABC):
         # Check for unexpected extra parameters if strict mode enabled
         if self.strict_parameters:
             for k in kwargs:
-                if k not in param_map:
+                # LLM models (e.g. Gemini) often pass rationale/reason metadata with tool calls
+                if k not in param_map and k not in ("reason", "rationale", "thought", "_thought"):
                     return False, f"Unexpected argument '{k}' provided to tool '{self.name}'."
 
         # Validate defined parameters

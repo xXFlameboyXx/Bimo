@@ -10,10 +10,13 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
+import logging
 from typing import Any
 
 from bimo.core.events import Event, EventBus, EventType
 from bimo.interfaces.devices import BaseDevice, DeviceCapability, DeviceStatus
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -249,10 +252,20 @@ class BaseTextToSpeech(BaseDevice, ABC):
         self._is_speaking = False
         self._event_bus = event_bus
         self._current_utterance_id = 0
+        if self._event_bus:
+            self._event_bus.subscribe(EventType.SPEECH_OUTPUT_CANCELLED, self._on_external_cancel)
+
+    def _on_external_cancel(self, event: Event) -> None:
+        """Stop playback immediately if cancellation was triggered externally."""
+        if event.source != self.id and self._is_speaking:
+            logger.info("TTS [%s] received external cancellation event (source=%s); stopping playback.", self.id, event.source)
+            self.stop()
 
     def attach_event_bus(self, event_bus: EventBus) -> None:
         """Attach an EventBus for publishing speech lifecycle domain events."""
         self._event_bus = event_bus
+        if self._event_bus:
+            self._event_bus.subscribe(EventType.SPEECH_OUTPUT_CANCELLED, self._on_external_cancel)
 
     def _publish_event(self, event_type: EventType, data: dict[str, Any] | None = None) -> None:
         """Publish a speech lifecycle domain event to the attached EventBus."""

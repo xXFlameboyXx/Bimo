@@ -339,7 +339,7 @@ class TestBimoPCToolsAndPermissions(unittest.TestCase):
         self.assertIsNotNone(win_tool)
         self.assertEqual(win_tool.permission, ToolPermission.SAFE)
 
-        confirm_tools = ["pc.open_app", "pc.close_app", "pc.type_text", "pc.press_key", "pc.click"]
+        confirm_tools = ["pc.open_app", "pc.close_app", "pc.open_url", "pc.type_text", "pc.press_key", "pc.click"]
         for tool_name in confirm_tools:
             tool = self.tool_registry.get(tool_name)
             self.assertIsNotNone(tool, f"Tool {tool_name} must be registered")
@@ -370,6 +370,30 @@ class TestBimoPCToolsAndPermissions(unittest.TestCase):
         res = tool.execute(app="notepad")
         self.assertTrue(res.success)
         self.assertIn("Successfully launched notepad", res.output)
+
+        res_yt = tool.execute(app="youtube")
+        self.assertTrue(res_yt.success)
+        self.assertIn("Successfully launched youtube", res_yt.output)
+
+    def test_open_url_tool_execution(self) -> None:
+        tool = self.tool_registry.get("pc.open_url")
+        self.assertIsNotNone(tool)
+        allowed, _ = self.policy.check_permission(tool, {"confirmed": True})
+        self.assertTrue(allowed)
+
+        res = tool.execute(url="https://www.youtube.com")
+        self.assertTrue(res.success)
+        self.assertIn("Opened https://www.youtube.com", res.output)
+
+    def test_play_youtube_tool(self) -> None:
+        tool = self.tool_registry.get("pc.play_youtube")
+        self.assertIsNotNone(tool)
+        allowed, _ = self.policy.check_permission(tool, {"confirmed": True})
+        self.assertTrue(allowed)
+
+        res = tool.execute(query="psi song")
+        self.assertTrue(res.success)
+        self.assertIn("Playing 'Top video for psi song' on YouTube.", res.output)
 
     def test_disconnected_pc_returns_friendly_error_without_crashing(self) -> None:
         self.mock_client.set_connected(False)

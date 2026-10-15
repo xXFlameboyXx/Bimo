@@ -89,13 +89,34 @@ def create_stt_provider(
         logger.info("Instantiating MockSpeechToText")
         return MockSpeechToText()
     elif cfg.stt_provider.lower() == "google":
-        logger.info("Instantiating legacy GoogleWebSTT provider")
-        return GoogleWebSTT()
+        lang = getattr(cfg, "stt_language", "en-US")
+        logger.info("Instantiating GoogleWebSTT provider (language=%s, with Whisper fallback)", lang)
+        custom_vocab = getattr(cfg, "custom_vocabulary", None)
+        vocab_repl = getattr(cfg, "vocab_replacements", None)
+        stt_lang = getattr(cfg, "stt_language", None)
+        whisper_fallback = WhisperSTT(
+            model_size=cfg.whisper_model,
+            model_path=cfg.whisper_model_path,
+            language=stt_lang,
+            custom_vocabulary=custom_vocab,
+            vocab_replacements=vocab_repl,
+        )
+        return GoogleWebSTT(
+            language=lang,
+            fallback_stt=whisper_fallback,
+            vocab_replacements=vocab_repl,
+        )
     else:
         logger.info("Instantiating WhisperSTT provider (model: %s)", cfg.whisper_model)
+        custom_vocab = getattr(cfg, "custom_vocabulary", None)
+        vocab_repl = getattr(cfg, "vocab_replacements", None)
+        stt_lang = getattr(cfg, "stt_language", None)
         return WhisperSTT(
             model_size=cfg.whisper_model,
             model_path=cfg.whisper_model_path,
+            language=stt_lang,
+            custom_vocabulary=custom_vocab,
+            vocab_replacements=vocab_repl,
         )
 
 
@@ -144,6 +165,9 @@ def create_voice_service(
     agent_input: AgentInputInterface | None = None,
     mock: bool = False,
     include_wake_word: bool = True,
+    require_wake_word: bool | None = None,
+    wake_word_models: Sequence[str] | None = None,
+    hybrid_wake_word: bool | None = None,
 ) -> VoiceService:
     """Create a fully configured VoiceService instance."""
     if config is None:
@@ -165,6 +189,10 @@ def create_voice_service(
         chunk_size=cfg.chunk_size,
     )
 
+    req_ww = require_wake_word if require_wake_word is not None else getattr(cfg, "require_wake_word", True)
+    ww_models = wake_word_models or getattr(cfg, "wake_word_models", ("bimo", "hey_jarvis", "alexa"))
+    hyb_ww = hybrid_wake_word if hybrid_wake_word is not None else getattr(cfg, "hybrid_wake_word", True)
+
     return VoiceService(
         microphone=mic,
         stt=stt,
@@ -174,6 +202,9 @@ def create_voice_service(
         vad=vad,
         speech_timeout=cfg.speech_timeout,
         max_speech_duration=cfg.max_speech_duration,
+        require_wake_word=req_ww,
+        wake_word_models=ww_models,
+        hybrid_wake_word=hyb_ww,
     )
 
 

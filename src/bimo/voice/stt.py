@@ -14,6 +14,7 @@ import wave
 from typing import Any
 
 from bimo.interfaces.voice import BaseSpeechToText, STTResult
+from bimo.voice.normalizer import normalize_phonetic_text
 
 logger = logging.getLogger(__name__)
 
@@ -81,15 +82,22 @@ class GoogleWebSTT(BaseSpeechToText):
     Requires no API keys and provides rapid transcription for development on PC.
     """
 
-    def __init__(self, language: str = "en-US") -> None:
+    def __init__(
+        self,
+        language: str = "en-US",
+        fallback_stt: BaseSpeechToText | None = None,
+        vocab_replacements: dict[str, str] | None = None,
+    ) -> None:
         self.language = language
+        self.fallback_stt = fallback_stt
+        self.vocab_replacements = dict(vocab_replacements or {})
         self._recognizer: Any = None
         if HAS_SR:
             self._recognizer = sr.Recognizer()
 
     @property
     def provider_name(self) -> str:
-        return "GoogleWebSTT"
+        return f"GoogleWebSTT({self.language})"
 
     @staticmethod
     def _normalize_pcm(pcm_bytes: bytes, target_peak: int = 22000, max_gain: float = 50.0) -> bytes:
@@ -97,11 +105,13 @@ class GoogleWebSTT(BaseSpeechToText):
         return normalize_pcm(pcm_bytes, target_peak=target_peak, max_gain=max_gain)
 
     def transcribe(self, audio_data: bytes, sample_rate: int = 16000) -> STTResult:
-        """Transcribe raw 16-bit PCM mono audio using Google Web STT."""
+        """Transcribe raw 16-bit PCM mono audio using Google Web STT with fallback."""
         if not audio_data or len(audio_data) < 100:
             return STTResult(text="", confidence=0.0, is_final=True, error="Empty audio")
 
         if not HAS_SR or self._recognizer is None:
+            if self.fallback_stt:
+                return self.fallback_stt.transcribe(audio_data, sample_rate)
             return STTResult(
                 text="",
                 confidence=0.0,
@@ -113,18 +123,28 @@ class GoogleWebSTT(BaseSpeechToText):
             # 16-bit mono PCM has sample_width = 2
             pcm_to_send = self._normalize_pcm(audio_data)
             sr_audio = sr.AudioData(pcm_to_send, sample_rate, 2)
-            logger.info("Transcribing audio buffer (%d bytes) via Google STT...", len(pcm_to_send))
+            logger.info("Transcribing audio buffer (%d bytes) via Google STT (%s)...", len(pcm_to_send), self.language)
             text = self._recognizer.recognize_google(sr_audio, language=self.language)
-            logger.info("Google STT transcribed text: '%s'", text)
-            return STTResult(text=text.strip(), confidence=0.95, is_final=True)
+            logger.info("Google STT raw transcribed text: '%s'", text)
+            normalized_text = normalize_phonetic_text(text, custom_replacements=self.vocab_replacements)
+            if normalized_text != text:
+                logger.info("Phonetic normalization applied: '%s' -> '%s'", text, normalized_text)
+            return STTResult(text=normalized_text.strip(), confidence=0.98, is_final=True)
         except sr.UnknownValueError:
             logger.info("Google STT: Speech unintelligible or silence detected")
+            # If Google didn't catch it and fallback exists, try fallback
+            if self.fallback_stt:
+                return self.fallback_stt.transcribe(audio_data, sample_rate)
             return STTResult(text="", confidence=0.0, is_final=True, error="Unintelligible speech")
         except sr.RequestError as e:
-            logger.error("Google STT network request error: %s", e)
+            logger.warning("Google STT network request error: %s; trying fallback STT...", e)
+            if self.fallback_stt:
+                return self.fallback_stt.transcribe(audio_data, sample_rate)
             return STTResult(text="", confidence=0.0, is_final=True, error=f"STT network error: {e}")
         except Exception as e:
-            logger.error("Unexpected error in Google STT: %s", e)
+            logger.warning("Unexpected error in Google STT: %s; trying fallback STT...", e)
+            if self.fallback_stt:
+                return self.fallback_stt.transcribe(audio_data, sample_rate)
             return STTResult(text="", confidence=0.0, is_final=True, error=str(e))
 
 
@@ -197,21 +217,62 @@ class WhisperSTT(BaseSpeechToText):
     for tiny.en in INT8), optimized for Raspberry Pi 3A+ and local embedded deployment.
     """
 
+    DEFAULT_INITIAL_PROMPT = (
+        "Bimo, BIMO, Beemo, paneer, Jarvis, Alexa, computer, open notepad, calculator, explorer, "
+        "youtube, play song, play video, despacito, gaana, chalao, gaane, sunao, kya haal hai, "
+        "namaste, shukriya, kaise ho, gana, bajao, roko, band karo, kholo, batao, "
+        "गाना, चलाओ, सुनो, नमस्कार, नमस्ते, बजाओ, बंद करो, खोलो, "
+        "type text, click, press enter, desktop, screen, window, "
+        "search, weather, turn on, turn off, lights, what is the time, hello."
+    )
+
+    DEFAULT_REPLACEMENTS: dict[str, str] = {
+        r"\b[Bb]e\s+more\b": "Bimo",
+        r"\b[Bb]e\s+mo\b": "Bimo",
+        r"\b[Bb]eemo\b": "Bimo",
+        r"\b[Bb]eam\s*o\b": "Bimo",
+        r"\b[Vv]eemo\b": "Bimo",
+        r"\b[Pp]ann?eer\b": "paneer",
+        r"\bepisode\s+song\b": "despacito",
+        r"\bpsi\s+song\b": "PSY song",
+        r"\b[Nn]umb\s*state\b": "namaste",
+        r"\b[Nn]um\s*stay\b": "namaste",
+        r"\b[Gg]un\s+chalao\b": "gaana chalao",
+        r"\b[Gg]anna\s+chalao\b": "gaana chalao",
+        r"\b[Gg]ana\s+chalao\b": "gaana chalao",
+        r"\b[Bb]andh?\s+karo\b": "band karo",
+    }
+
     def __init__(
         self,
         model_size: str = "base.en",
         model_path: str | None = None,
+        language: str | None = None,
         device: str = "cpu",
         compute_type: str = "int8",
         beam_size: int = 5,
-        initial_prompt: str | None = "Bimo, Jarvis, Alexa, computer, switch, turn on, turn off, lights, time, weather.",
+        initial_prompt: str | None = None,
+        custom_vocabulary: tuple[str, ...] | list[str] | None = None,
+        vocab_replacements: dict[str, str] | None = None,
     ) -> None:
         self.model_size = model_size
         self.model_path = model_path
+        self.language = language
         self.device = device
         self.compute_type = compute_type
         self.beam_size = beam_size
-        self.initial_prompt = initial_prompt
+
+        # Combine default prompt with any custom vocabulary
+        prompt_parts = [initial_prompt or self.DEFAULT_INITIAL_PROMPT]
+        if custom_vocabulary:
+            prompt_parts.extend(custom_vocabulary)
+        self.initial_prompt = ", ".join(prompt_parts)
+
+        # Merge replacements
+        self.replacements: dict[str, str] = dict(self.DEFAULT_REPLACEMENTS)
+        if vocab_replacements:
+            self.replacements.update(vocab_replacements)
+
         self._model: Any = None
         self._is_initialized = False
 
@@ -270,7 +331,7 @@ class WhisperSTT(BaseSpeechToText):
             )
 
         # Normalize PCM amplitude to boost signal-to-noise ratio on quiet microphones
-        norm_pcm = normalize_pcm(audio_data, target_peak=22000, max_gain=4.0, noise_floor_peak=350.0)
+        norm_pcm = normalize_pcm(audio_data, target_peak=22000, max_gain=50.0, noise_floor_peak=15.0)
 
         # Ensure audio byte length is even for 16-bit PCM
         if len(norm_pcm) % 2 != 0:
@@ -313,16 +374,24 @@ class WhisperSTT(BaseSpeechToText):
                 except Exception as resample_err:
                     logger.debug("Scipy resampling failed: %s; proceeding without resampling.", resample_err)
 
+            # For English-only models (.en), language must be 'en'
+            # For multilingual models (e.g. 'base', 'small'), allow auto-detection (None) or specified language
+            effective_lang = self.language
+            if self.model_size and self.model_size.endswith(".en"):
+                effective_lang = "en"
+
             # Transcribe directly from in-memory numpy array without disk I/O
+            # vad_filter=False because audio is already pre-segmented by upstream EnergyVAD
             segments, info = self._model.transcribe(
                 audio_float32,
                 beam_size=self.beam_size,
                 best_of=self.beam_size,
-                language="en",
+                language=effective_lang,
                 task="transcribe",
                 initial_prompt=self.initial_prompt,
                 condition_on_previous_text=False,
-                vad_filter=True,  # Silero VAD filtering eliminates background hallucinations
+                temperature=0.0,
+                vad_filter=False,
             )
 
             # Concatenate segment texts
@@ -343,6 +412,13 @@ class WhisperSTT(BaseSpeechToText):
                 if segment_confidences
                 else (1.0 if full_text else 0.0)
             )
+
+            # Apply phonetic and custom vocabulary replacements
+            if full_text:
+                original_text = full_text
+                full_text = normalize_phonetic_text(full_text, custom_replacements=self.replacements)
+                if full_text != original_text:
+                    logger.info("Vocabulary / phonetic replacement applied: '%s' -> '%s'", original_text, full_text)
 
             logger.info(
                 "Whisper transcribed '%s' (Confidence: %.2f)",

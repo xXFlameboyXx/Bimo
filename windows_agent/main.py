@@ -32,6 +32,12 @@ def main() -> None:
         default=None,
         help="Comma-separated allowlisted applications (e.g. notepad,calculator,explorer)",
     )
+    parser.add_argument(
+        "--allowlist-mode",
+        action="store_true",
+        default=None,
+        help="Enforce strict allowlist mode instead of dynamic application discovery",
+    )
 
     args = parser.parse_args()
 
@@ -45,6 +51,11 @@ def main() -> None:
         if args.allowed_apps
         else cfg.pc_agent.allowed_apps
     )
+    allowlist_mode = (
+        args.allowlist_mode
+        if args.allowlist_mode is not None
+        else cfg.pc_agent.application_allowlist_mode
+    )
 
     if not secret:
         logger.error("ERROR: No shared secret provided! Set PC_AGENT_SHARED_SECRET or pass --secret.")
@@ -52,10 +63,10 @@ def main() -> None:
 
     logger.info("Starting Bimo Windows PC Agent...")
     logger.info("Host: %s | Port: %d", host, port)
-    logger.info("Allowed Applications: %s", ", ".join(apps))
+    logger.info("Application Discovery: %s (Allowlist Mode: %s)", "Active" if not allowlist_mode else "Disabled", allowlist_mode)
     logger.info("Authentication: HMAC-SHA256 (Shared Secret configured)")
 
-    registry = build_default_command_registry(allowed_apps=apps)
+    registry = build_default_command_registry(allowed_apps=apps, allowlist_mode=allowlist_mode)
     manager = PCAgentServerManager(
         host=host,
         port=port,

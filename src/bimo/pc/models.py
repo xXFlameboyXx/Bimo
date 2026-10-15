@@ -26,6 +26,55 @@ class PCErrorCode(str, Enum):
     KEY_NOT_ALLOWED = "KEY_NOT_ALLOWED"
     UNAVAILABLE = "UNAVAILABLE"
     TIMEOUT = "TIMEOUT"
+    # Targeted Windows Interaction Error Codes
+    TARGET_NOT_FOUND = "TARGET_NOT_FOUND"
+    TARGET_CLOSED = "TARGET_CLOSED"
+    TARGET_PROCESS_CHANGED = "TARGET_PROCESS_CHANGED"
+    TARGET_FOCUS_FAILED = "TARGET_FOCUS_FAILED"
+    TARGET_NOT_FOREGROUND = "TARGET_NOT_FOREGROUND"
+    USER_INTERACTION_INTERRUPTED = "USER_INTERACTION_INTERRUPTED"
+    INPUT_ABORTED = "INPUT_ABORTED"
+    WINDOW_RESTORE_FAILED = "WINDOW_RESTORE_FAILED"
+    WINDOW_VALIDATION_FAILED = "WINDOW_VALIDATION_FAILED"
+    # Application Discovery & Security Boundaries
+    APPLICATION_NOT_FOUND = "APPLICATION_NOT_FOUND"
+    APPLICATION_AMBIGUOUS = "APPLICATION_AMBIGUOUS"
+    ARBITRARY_PATH_REJECTED = "ARBITRARY_PATH_REJECTED"
+    ELEVATION_REQUIRED = "ELEVATION_REQUIRED"
+    SECURE_DESKTOP_UNAVAILABLE = "SECURE_DESKTOP_UNAVAILABLE"
+    TARGET_ACCESS_DENIED = "TARGET_ACCESS_DENIED"
+
+
+@dataclass(frozen=True)
+class TargetWindow:
+    """Explicit window target abstraction for reliable Windows interaction."""
+    hwnd: int
+    process_id: int
+    process_name: str
+    title: str = ""
+    app_name: Optional[str] = None
+    is_minimized: bool = False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "hwnd": self.hwnd,
+            "process_id": self.process_id,
+            "process_name": self.process_name,
+            "title": self.title,
+            "app_name": self.app_name,
+            "is_minimized": self.is_minimized,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> TargetWindow:
+        return cls(
+            hwnd=int(data.get("hwnd", 0)),
+            process_id=int(data.get("process_id", data.get("pid", 0))),
+            process_name=str(data.get("process_name", data.get("process", ""))),
+            title=str(data.get("title", "")),
+            app_name=data.get("app_name") or data.get("app"),
+            is_minimized=bool(data.get("is_minimized", False)),
+        )
 
 
 @dataclass(frozen=True)

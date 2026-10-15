@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import platform
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
@@ -20,6 +21,19 @@ from windows_agent.registry import PCCommandRegistry
 logger = logging.getLogger(__name__)
 
 MAX_PAYLOAD_BYTES = 64 * 1024  # 64 KB limit
+
+
+def _ensure_input_desktop() -> None:
+    if platform.system() != "Windows":
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        hinput = user32.OpenInputDesktop(0, False, 0x0100)
+        if hinput:
+            user32.SetThreadDesktop(hinput)
+    except Exception:
+        pass
 
 
 class PCAgentHTTPHandler(BaseHTTPRequestHandler):
@@ -39,6 +53,7 @@ class PCAgentHTTPHandler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self) -> None:
+        _ensure_input_desktop()
         if self.path in ("/api/v1/health", "/health"):
             self._send_json_response(HTTPStatus.OK, {"status": "ok"})
         else:
@@ -48,6 +63,7 @@ class PCAgentHTTPHandler(BaseHTTPRequestHandler):
             )
 
     def do_POST(self) -> None:
+        _ensure_input_desktop()
         if self.path != "/api/v1/command":
             self._send_json_response(
                 HTTPStatus.NOT_FOUND,

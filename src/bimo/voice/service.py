@@ -25,6 +25,7 @@ from bimo.interfaces.voice import (
     STTResult,
 )
 from bimo.voice.agent_input import DefaultAgentInput
+from bimo.voice.normalizer import contains_wake_word, normalize_phonetic_text
 from bimo.voice.vad import EnergyVAD
 
 logger = logging.getLogger(__name__)
@@ -52,6 +53,9 @@ class VoiceService:
         min_speech_bytes: int = 3200,  # At least 0.1s of 16kHz audio
         speech_timeout: float = 5.0,  # Max seconds to wait for speech start after wake word
         max_speech_duration: float = 10.0,  # Max speech capture length in seconds
+        require_wake_word: bool = False,
+        wake_word_models: Sequence[str] | None = None,
+        hybrid_wake_word: bool = True,
     ) -> None:
         self.microphone = microphone
         self.stt = stt
@@ -65,6 +69,11 @@ class VoiceService:
         self.min_speech_bytes = min_speech_bytes
         self.speech_timeout = speech_timeout
         self.max_speech_duration = max_speech_duration
+        self.require_wake_word = require_wake_word
+        self.wake_word_models = tuple(wake_word_models) if wake_word_models else ("bimo", "hey_jarvis", "alexa")
+        self.hybrid_wake_word = hybrid_wake_word
+        self._wake_word_detected_for_current_turn = False
+        self._detected_wake_word_model: str | None = None
 
         if self.wake_word_detector and self.event_bus:
             self.wake_word_detector.attach_event_bus(self.event_bus)
@@ -100,6 +109,10 @@ class VoiceService:
         preroll_count = max(4, int(math.ceil(preroll_duration / chunk_duration)))
         self._preroll_buffer: collections.deque[bytes] = collections.deque(maxlen=preroll_count)
 
+        # Barge-in and spoken interrupt tracking
+        self._barge_in_buffer = bytearray()
+        self._barge_in_silence_count = 0
+
     def _on_wake_word_event(self, event: Event) -> None:
         """Respond to externally triggered wake word events (e.g. keyboard UI, remote client)."""
         if event.source == "voice_service":
@@ -114,6 +127,8 @@ class VoiceService:
             self._is_self_speaking = True
             self._speech_buffer.clear()
             self._preroll_buffer.clear()
+            self._barge_in_buffer.clear()
+            self._barge_in_silence_count = 0
             self.vad.reset()
             if self._stage == VoicePipelineStage.CAPTURING_SPEECH:
                 self._stage = (
@@ -216,6 +231,8 @@ class VoiceService:
         """Manually trigger wake-word activation (useful for testing and UI events)."""
         now = time.time()
         with self._lock:
+            self._wake_word_detected_for_current_turn = True
+            self._detected_wake_word_model = model_name
             self._stage = VoicePipelineStage.CAPTURING_SPEECH
             self._capture_start_time = now
             self._user_spoke_in_capture = False
@@ -254,10 +271,86 @@ class VoiceService:
                 time.sleep(0.2)
                 continue
 
-            if not chunk or self._is_self_speaking:
+            if not chunk:
                 continue
 
             now = time.time()
+
+            # Barge-in and spoken interrupt support: When Bimo is speaking
+            if self._is_self_speaking:
+                # 1. Wake word detector check
+                if self.wake_word_detector is not None:
+                    ww_res = self.wake_word_detector.process_audio(chunk)
+                    if ww_res.detected:
+                        logger.info("Barge-in wake word detected while speaking! Cancelling TTS.")
+                        self._publish_event(EventType.SPEECH_OUTPUT_CANCELLED, {"reason": "barge_in"})
+                        self._is_self_speaking = False
+                        self._stage = VoicePipelineStage.CAPTURING_SPEECH
+                        self._capture_start_time = now
+                        self._user_spoke_in_capture = False
+                        self._speech_buffer.clear()
+                        self._barge_in_buffer.clear()
+                        self.vad.reset()
+                        self._publish_event(
+                            EventType.LISTENING_STARTED,
+                            {"source": "barge_in", "model": ww_res.model_name},
+                        )
+                        self._publish_event(
+                            EventType.SPEECH_CAPTURE_STARTED,
+                            {"timestamp": now},
+                        )
+                        continue
+
+                # 2. Spoken interrupt check (e.g. saying "Stop", "Cancel", "Abort" into mic)
+                vad_res = self.vad.process_chunk(chunk)
+                if vad_res.is_speech or vad_res.activity_started:
+                    self._barge_in_buffer.extend(chunk)
+                    self._barge_in_silence_count = 0
+                elif len(self._barge_in_buffer) > 0:
+                    self._barge_in_buffer.extend(chunk)
+                    self._barge_in_silence_count += 1
+                    # After ~0.25s of silence or max 1.5s audio (approx 24000 bytes for 16kHz 16-bit mono)
+                    if self._barge_in_silence_count >= 4 or len(self._barge_in_buffer) >= 24000:
+                        barge_audio = bytes(self._barge_in_buffer)
+                        self._barge_in_buffer.clear()
+                        self._barge_in_silence_count = 0
+                        try:
+                            stt_res = self.stt.transcribe(barge_audio, sample_rate=self.microphone.sample_rate)
+                            raw_txt = (stt_res.text or "").strip()
+                            if raw_txt:
+                                txt = normalize_phonetic_text(raw_txt)
+                                logger.debug("Barge-in speech transcribed during TTS playback: '%s'", txt)
+                                from bimo.agent.cancellation import TaskInterruptManager, InterruptCommand
+                                cmd = TaskInterruptManager.classify(txt)
+                                if cmd != InterruptCommand.NONE or any(
+                                    w in txt.lower() for w in ("stop", "cancel", "shut up", "abort", "quiet", "halt", "pause", "never mind", "nevermind", "wait", "continue", "resume", "shh", "ruko", "rok do")
+                                ):
+                                    logger.info("Spoken interrupt '%s' (cmd=%s) confirmed while speaking! Cancelling TTS.", txt, cmd.value)
+                                    self._publish_event(
+                                        EventType.SPEECH_OUTPUT_CANCELLED,
+                                        {"reason": "user_interrupt", "transcript": txt, "command": cmd.value},
+                                    )
+                                    self._publish_event(
+                                        EventType.INTERRUPT_COMMAND_RECEIVED,
+                                        {"command": cmd.value, "transcript": txt, "source": "barge_in"},
+                                    )
+                                    self._is_self_speaking = False
+                                    self.vad.reset()
+                                    try:
+                                        self.microphone.flush()
+                                    except Exception:
+                                        pass
+
+                                    # Forward interrupt to orchestrator/agent to pause, cancel, or resume task
+                                    self.agent_input.receive_user_input(
+                                        txt,
+                                        metadata={"barge_in": True, "command": cmd.value},
+                                    )
+                                else:
+                                    logger.debug("Ignoring non-interrupt audio transcribed during speech: '%s'", txt)
+                        except Exception as b_err:
+                            logger.debug("Barge-in transcription error: %s", b_err)
+                continue
 
             # Pipeline Mode 1: Wake-word detector is configured
             if self.wake_word_detector is not None:
@@ -272,6 +365,8 @@ class VoiceService:
                             ww_res.model_name,
                             ww_res.score,
                         )
+                        self._wake_word_detected_for_current_turn = True
+                        self._detected_wake_word_model = ww_res.model_name
                         self._stage = VoicePipelineStage.CAPTURING_SPEECH
                         self._capture_start_time = now
                         self._user_spoke_in_capture = False
@@ -290,6 +385,35 @@ class VoiceService:
                             {"timestamp": now},
                         )
                         self.vad.reset()
+
+                    elif self.hybrid_wake_word:
+                        # Hybrid / Speech-assisted wake word detection:
+                        # If acoustic detector didn't fire, monitor VAD speech onset to capture potential "Bimo" wake phrases
+                        vad_res = self.vad.process_chunk(chunk)
+                        if vad_res.activity_started:
+                            logger.debug("Voice onset in WAITING_FOR_WAKE_WORD; starting candidate capture...")
+                            self._wake_word_detected_for_current_turn = False
+                            self._detected_wake_word_model = None
+                            self._stage = VoicePipelineStage.CAPTURING_SPEECH
+                            self._capture_start_time = now
+                            self._user_spoke_in_capture = True
+                            self._speech_buffer.clear()
+                            for p in self._preroll_buffer:
+                                self._speech_buffer.extend(p)
+                            self._speech_buffer.extend(chunk)
+                            self._preroll_buffer.clear()
+                            self._publish_event(
+                                EventType.VOICE_ACTIVITY_STARTED,
+                                {"rms_energy": vad_res.rms_energy},
+                            )
+                            self._publish_event(
+                                EventType.USER_SPEAKING,
+                                {"audio_level": vad_res.rms_energy},
+                            )
+                            self._publish_event(
+                                EventType.SPEECH_CAPTURE_STARTED,
+                                {"timestamp": now},
+                            )
 
                 elif self._stage == VoicePipelineStage.CAPTURING_SPEECH:
                     self._speech_buffer.extend(chunk)
@@ -326,9 +450,9 @@ class VoiceService:
                         continue
 
                     # End of speech condition: user spoke and silence threshold reached, or max duration exceeded
-                    # Enforce a minimum capture duration (0.3s) to prevent immediate cutoff on wake-word release
+                    capture_audio_sec = len(self._speech_buffer) / float(self.microphone.sample_rate * 2)
                     if self._user_spoke_in_capture and (
-                        (vad_res.activity_stopped and capture_elapsed >= 0.3)
+                        (vad_res.activity_stopped and (capture_elapsed >= 0.2 or capture_audio_sec >= 0.2))
                         or capture_elapsed >= self.max_speech_duration
                     ):
                         logger.info(
@@ -409,6 +533,11 @@ class VoiceService:
                         self._transcribe_and_dispatch(captured_audio)
                     else:
                         logger.debug("Discarding short audio pulse (< min_speech_bytes)")
+
+                    # Flush stale audio accumulated in microphone queue during transcription
+                    self.microphone.flush()
+                    self._preroll_buffer.clear()
+                    self.vad.reset()
                 else:
                     self._preroll_buffer.append(chunk)
 
@@ -433,35 +562,89 @@ class VoiceService:
                     {"error": result.error},
                 )
             elif result.text:
-                # Successful transcription
+                # 1. Phonetic normalization across speech recognizer variants
+                normalized_text = normalize_phonetic_text(result.text)
+
+                # 2. Check for wake-word presence in the speech
+                has_ww, matched_ww = contains_wake_word(
+                    normalized_text, configured_models=self.wake_word_models
+                )
+
+                # 3. Urgent interruption command check (e.g. "wait", "stop", "continue", "pause", "cancel")
+                from bimo.agent.cancellation import TaskInterruptManager, InterruptCommand
+                cmd = TaskInterruptManager.classify(normalized_text)
+                is_interrupt = (cmd != InterruptCommand.NONE) or any(
+                    normalized_text.lower().startswith(w) for w in ("stop", "wait", "pause", "continue", "resume", "hold on", "cancel", "ruko", "rok do")
+                )
+
+                # 4. Check if wake word requirement was satisfied (acoustically, via speech, or urgent interrupt)
+                is_wake_word_satisfied = self._wake_word_detected_for_current_turn or has_ww or is_interrupt
+
+                if is_interrupt:
+                    logger.info("VoiceService: Urgent interruption command '%s' (cmd=%s) recognized.", normalized_text, cmd.value)
+                    self._publish_event(
+                        EventType.INTERRUPT_COMMAND_RECEIVED,
+                        {"command": cmd.value, "transcript": normalized_text},
+                    )
+
+                # 5. Strict gating: Drop utterance only if wake-word is required AND not an urgent interrupt
+                if self.require_wake_word and not is_wake_word_satisfied:
+                    logger.info(
+                        "VoiceService: Speech ignored (wake word required, but not detected in '%s')",
+                        normalized_text,
+                    )
+                    self._publish_event(
+                        EventType.SPEECH_IGNORED,
+                        {
+                            "transcript": normalized_text,
+                            "raw_transcript": result.text,
+                            "reason": "no_wake_word",
+                            "confidence": result.confidence,
+                        },
+                    )
+                    return
+
+                # If wake word detected via speech transcript, emit wake word event
+                if has_ww and not self._wake_word_detected_for_current_turn:
+                    ww_name = matched_ww or "Bimo"
+                    logger.info("VoiceService: Wake word '%s' confirmed in transcript.", ww_name)
+                    self._publish_event(
+                        EventType.WAKE_WORD_DETECTED,
+                        {"model": ww_name, "score": 1.0, "source": "transcript"},
+                    )
+
                 logger.info(
                     "Transcribed speech: '%s' (Confidence: %.2f)",
-                    result.text,
+                    normalized_text,
                     result.confidence,
                 )
                 self._publish_event(
                     EventType.SPEECH_TRANSCRIPTION_COMPLETED,
                     {
-                        "transcript": result.text,
+                        "transcript": normalized_text,
                         "confidence": result.confidence,
+                    },
+                )
+
+                utterance_id = f"utt-{time.time():.4f}-{len(audio_bytes)}"
+
+                # Emit SPEECH_RECEIVED event (transitions LISTENING -> THINKING immediately)
+                self._publish_event(
+                    EventType.SPEECH_RECEIVED,
+                    {
+                        "transcript": normalized_text,
+                        "confidence": result.confidence,
+                        "utterance_id": utterance_id,
                     },
                 )
 
                 # Deliver to AgentInputInterface (strictly no LLM invocation in Phase 3/3.5)
                 self.agent_input.receive_user_input(
-                    result.text,
+                    normalized_text,
                     metadata={
                         "confidence": result.confidence,
                         "audio_bytes_length": len(audio_bytes),
-                    },
-                )
-
-                # Emit SPEECH_RECEIVED event (transitions LISTENING -> THINKING)
-                self._publish_event(
-                    EventType.SPEECH_RECEIVED,
-                    {
-                        "transcript": result.text,
-                        "confidence": result.confidence,
+                        "utterance_id": utterance_id,
                     },
                 )
             else:
@@ -486,15 +669,46 @@ class VoiceService:
         )
         result = self.stt.transcribe(audio_bytes, sample_rate=self.microphone.sample_rate)
         if result.text:
+            normalized_text = normalize_phonetic_text(result.text)
+            has_ww, matched_ww = contains_wake_word(normalized_text, configured_models=self.wake_word_models)
+            from bimo.agent.cancellation import TaskInterruptManager, InterruptCommand
+            cmd = TaskInterruptManager.classify(normalized_text)
+            is_interrupt = (cmd != InterruptCommand.NONE) or any(
+                normalized_text.lower().startswith(w) for w in ("stop", "wait", "pause", "continue", "resume", "hold on", "cancel", "ruko", "rok do")
+            )
+            wake_word_satisfied = self._wake_word_detected_for_current_turn or has_ww or is_interrupt
+
+            if self.require_wake_word and not wake_word_satisfied:
+                logger.info("Speech buffer ignored (wake word required but not in '%s')", normalized_text)
+                self._publish_event(
+                    EventType.SPEECH_IGNORED,
+                    {"transcript": normalized_text, "raw_transcript": result.text, "reason": "no_wake_word"},
+                )
+                return STTResult(text=normalized_text, confidence=result.confidence, is_final=True)
+
+            if is_interrupt:
+                self._publish_event(
+                    EventType.INTERRUPT_COMMAND_RECEIVED,
+                    {"command": cmd.value, "transcript": normalized_text},
+                )
+
+            if has_ww and not self._wake_word_detected_for_current_turn:
+                ww_name = matched_ww or "Bimo"
+                self._publish_event(
+                    EventType.WAKE_WORD_DETECTED,
+                    {"model": ww_name, "score": 1.0, "source": "transcript"},
+                )
+
             self._publish_event(
                 EventType.SPEECH_TRANSCRIPTION_COMPLETED,
-                {"transcript": result.text, "confidence": result.confidence},
+                {"transcript": normalized_text, "confidence": result.confidence},
             )
-            self.agent_input.receive_user_input(result.text, metadata={"confidence": result.confidence})
+            self.agent_input.receive_user_input(normalized_text, metadata={"confidence": result.confidence})
             self._publish_event(
                 EventType.SPEECH_RECEIVED,
-                {"transcript": result.text, "confidence": result.confidence},
+                {"transcript": normalized_text, "confidence": result.confidence},
             )
+            return STTResult(text=normalized_text, confidence=result.confidence, is_final=True)
         elif result.error:
             self._publish_event(
                 EventType.SPEECH_TRANSCRIPTION_ERROR,

@@ -1,0 +1,11 @@
+Test ID,Capability,Category,Status,Score
+1,Robot Status Check,Robot Tools,PASSED,97
+2,PC Status Check,PC Tools,PASSED,97
+3,Desktop Screenshot,PC Control,PASSED,88
+4,PDF Creation,Documents,PASSED,95
+5,Bar Chart Rendering,Images,PASSED,90
+6,Word Document,Documents,PASSED,95
+7,Excel Spreadsheet,Spreadsheets,PASSED,92
+8,Markdown File,Documents,PASSED,93
+9,JSON File,Data,PASSED,96
+10,CSV File,Data,PASSED,96

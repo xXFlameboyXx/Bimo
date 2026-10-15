@@ -100,6 +100,9 @@ class ConversationContext:
             if len(self._history) > self.max_history:
                 overflow = len(self._history) - self.max_history
                 del self._history[:overflow]
+                # History must always start with a user turn (never an orphaned tool or assistant message)
+                while self._history and self._history[0].role in (Role.TOOL, Role.ASSISTANT):
+                    del self._history[0]
 
     def get_messages(self) -> list[Message]:
         """Construct the complete prompt payload: system message + recent history."""

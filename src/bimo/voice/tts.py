@@ -53,6 +53,68 @@ except ImportError:
     SynthesisConfig = None  # type: ignore
     HAS_PIPER = False
 
+import re
+
+
+def sanitize_for_speech(text: str) -> str:
+    """Clean and transform raw AI text into natural spoken English for TTS engines.
+
+    Strips markdown formatting, headers, links, emojis, code blocks, and symbols
+    so synthesizers (Piper, SAPI) do not dictate symbol names like 'asterisk', 'hash',
+    'bracket', 'backtick', etc.
+    """
+    if not text or not text.strip():
+        return ""
+
+    t = text
+    # 1. Remove fenced code blocks and inline code
+    t = re.sub(r"```[\s\S]*?```", "", t)
+    t = re.sub(r"`(.*?)`", r"\1", t)
+
+    # 2. Markdown links: [Label](URL) -> Label; strip standalone URLs
+    t = re.sub(r"\[(.*?)\]\(.*?\)", r"\1", t)
+    t = re.sub(r"https?://\S+", "", t)
+
+    # 3. Strip headers (# Header -> Header)
+    t = re.sub(r"^\s*#{1,6}\s*", "", t, flags=re.MULTILINE)
+
+    # 4. Strip bold / italic markers (**text**, *text*, __text__, _text_)
+    t = re.sub(r"\*\*(.*?)\*\*", r"\1", t)
+    t = re.sub(r"\*(.*?)\*", r"\1", t)
+    t = re.sub(r"__(.*?)__", r"\1", t)
+    t = re.sub(r"(?<!\w)_(.*?)_(?!\w)", r"\1", t)
+
+    # 5. List items (- item, * item, 1. item)
+    t = re.sub(r"^\s*[-*•+]\s+", "", t, flags=re.MULTILINE)
+    t = re.sub(r"^\s*\d+\.\s+", "", t, flags=re.MULTILINE)
+
+    # 6. Blockquotes and horizontal rules
+    t = re.sub(r"^\s*>\s*", "", t, flags=re.MULTILINE)
+    t = re.sub(r"^\s*[-*_]{3,}\s*$", "", t, flags=re.MULTILINE)
+
+    # 7. Units and symbol expansions for natural vocalization
+    t = re.sub(r"(\d+)\s*°\s*C\b", r"\1 degrees Celsius", t)
+    t = re.sub(r"(\d+)\s*°\s*F\b", r"\1 degrees Fahrenheit", t)
+    t = t.replace("°", " degrees ")
+    t = t.replace("%", " percent ")
+    t = t.replace("&", " and ")
+    t = re.sub(r"\bkm/h\b", "kilometers per hour", t)
+    t = re.sub(r"\bmph\b", "miles per hour", t)
+
+    # 8. Strip non-spoken symbols (asterisks, hashes, backticks, tildes, brackets, pipes)
+    t = re.sub(r"[*#~`_{}|^\\<>[\]]", " ", t)
+
+    # 9. Strip emojis and non-speech unicode characters
+    clean_chars: list[str] = [
+        ch if (ord(ch) < 128 or 0x00C0 <= ord(ch) <= 0x00FF) else " " for ch in t
+    ]
+    t = "".join(clean_chars)
+
+    # 10. Clean up spacing and punctuation
+    t = re.sub(r"\s*([.,!?])\s*", r"\1 ", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
 
 class WindowsTTS(BaseTextToSpeech):
     """Windows Text-To-Speech implementation using native Microsoft SAPI.SpVoice.
@@ -230,6 +292,10 @@ class WindowsTTS(BaseTextToSpeech):
             logger.warning("Empty or blank text passed to speak(); skipping.")
             return False
 
+        clean_text = sanitize_for_speech(text)
+        if not clean_text:
+            return False
+
         with self._lock:
             # If already speaking, interrupt current speech before starting new one
             if self._is_speaking:
@@ -246,7 +312,7 @@ class WindowsTTS(BaseTextToSpeech):
         self._publish_event(
             EventType.SPEECH_OUTPUT_STARTED,
             {
-                "text": text,
+                "text": clean_text,
                 "voice": self.voice,
                 "rate": self.speech_rate,
                 "volume": self.volume,
@@ -254,12 +320,12 @@ class WindowsTTS(BaseTextToSpeech):
         )
 
         if block:
-            self._speak_worker(text, utterance_id)
+            self._speak_worker(clean_text, utterance_id)
             return True
         else:
             self._playback_thread = threading.Thread(
                 target=self._speak_worker,
-                args=(text, utterance_id),
+                args=(clean_text, utterance_id),
                 daemon=True,
                 name="WindowsTTSPlayback",
             )
@@ -784,7 +850,9 @@ class PiperTTS(BaseTextToSpeech):
             logger.debug("Empty or blank text passed to speak(); skipping.")
             return False
 
-        clean_text = text.strip()
+        clean_text = sanitize_for_speech(text)
+        if not clean_text:
+            return False
 
         with self._lock:
             if self._is_speaking:

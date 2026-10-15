@@ -25,6 +25,16 @@ class PCCommandSpec:
     optional_args: List[str] = field(default_factory=list)
 
 
+class PCCommandError(Exception):
+    """Exception raised by PC command handlers carrying an explicit PCErrorCode."""
+
+    def __init__(self, code: str, message: str, details: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details
+
+
 class PCCommandRegistry:
     """Registry managing allowed executable commands on the Windows PC Agent."""
 
@@ -117,10 +127,32 @@ class PCCommandRegistry:
                 command=command_name,
                 output=output,
             )
+        except PCCommandError as cmd_err:
+            return PCResponse(
+                version=1,
+                request_id=request_id,
+                success=False,
+                command=command_name,
+                error=PCError(code=cmd_err.code, message=cmd_err.message, details=cmd_err.details),
+            )
         except ValueError as val_err:
             msg = str(val_err)
             err_code = PCErrorCode.INVALID_ARGUMENTS.value
-            if "not in the allowed applications list" in msg:
+            for code in PCErrorCode:
+                if msg.startswith(f"[{code.value}]"):
+                    err_code = code.value
+                    msg = msg[len(code.value) + 2 :].strip()
+                    break
+                elif msg == code.value:
+                    err_code = code.value
+                    break
+            if (
+                "not in the allowed applications list" in msg
+                or "Arbitrary path execution is prohibited" in msg
+                or "not installed or could not be found" in msg
+                or "not installed or could not be resolved" in msg
+                or "Ambiguous application name" in msg
+            ):
                 err_code = PCErrorCode.APP_NOT_ALLOWED.value
             elif "not in the allowed keys list" in msg:
                 err_code = PCErrorCode.KEY_NOT_ALLOWED.value

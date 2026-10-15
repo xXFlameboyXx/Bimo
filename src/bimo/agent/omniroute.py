@@ -20,6 +20,7 @@ from bimo.interfaces.llm import (
     LLMRequest,
     LLMResponse,
     Message,
+    Role,
     TokenUsage,
     ToolCall,
 )
@@ -72,9 +73,21 @@ class OmniRouteLLM(LLMProvider):
         """Generate a complete completion response from OmniRoute."""
         messages_payload: list[dict[str, Any]] = []
         for msg in request.messages:
+            content = msg.content
+            if msg.role == Role.TOOL:
+                # Antigravity upstream drops empty tool responses, causing 400
+                content = str(content) if (content is not None and str(content).strip()) else "{}"
+            elif msg.role in (Role.USER, Role.SYSTEM):
+                content = str(content) if content is not None else ""
+            elif msg.role == Role.ASSISTANT:
+                if msg.tool_calls:
+                    content = str(content) if (content is not None and str(content).strip()) else None
+                else:
+                    content = str(content) if content is not None else ""
+
             item: dict[str, Any] = {
                 "role": msg.role.value,
-                "content": msg.content,
+                "content": content,
             }
             if msg.name:
                 item["name"] = msg.name
@@ -95,6 +108,15 @@ class OmniRouteLLM(LLMProvider):
                     for tc in msg.tool_calls
                 ]
             messages_payload.append(item)
+
+        # Ensure no trailing assistant turn (upstream Antigravity rejects requests ending with model turn)
+        while messages_payload and messages_payload[-1]["role"] == "assistant":
+            logger.debug("Pruning trailing assistant message from OmniRoute request payload.")
+            messages_payload.pop()
+
+        # If payload ended up empty, provide safe user fallback turn
+        if not messages_payload or not any(m["role"] == "user" for m in messages_payload):
+            messages_payload.append({"role": "user", "content": "Hello"})
 
         body_dict: dict[str, Any] = {
             "model": self.model_name,

@@ -1,0 +1,1 @@
+Hello Bimo! This is a real UTF-8 text file created by the ArtifactService.

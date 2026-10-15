@@ -1,0 +1,31 @@
+{
+  "reason": "Storing demo results as structured JSON",
+  "demo": {
+    "name": "Bimo Autonomous Self-Test",
+    "year": 2025,
+    "robot": {
+      "name": "Bimo",
+      "status": "online",
+      "uptime_seconds": 257
+    },
+    "pc": {
+      "hostname": "LOQ",
+      "os": "Windows 11",
+      "status": "online"
+    },
+    "capabilities_tested": [
+      "PDF creation",
+      "Word document",
+      "Excel spreadsheet",
+      "Markdown file",
+      "JSON file",
+      "CSV file",
+      "Bar chart rendering",
+      "Screenshot",
+      "Robot status",
+      "PC status"
+    ],
+    "result": "ALL PASSED",
+    "score": "100%"
+  }
+}

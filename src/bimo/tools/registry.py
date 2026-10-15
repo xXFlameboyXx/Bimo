@@ -71,7 +71,7 @@ class ToolRegistry:
             return False
 
     def get(self, tool_name: str) -> BaseTool | None:
-        """Retrieve a tool by name, supporting dot/underscore normalization."""
+        """Retrieve a tool by name, supporting dot/underscore normalization and provider hex suffix resolution."""
         with self._lock:
             if tool_name in self._tools:
                 return self._tools[tool_name]
@@ -82,6 +82,16 @@ class ToolRegistry:
             for name, tool in self._tools.items():
                 if name.replace(".", "_") == underscored:
                     return tool
+
+            # Upstream Gemini / OmniRoute providers frequently append hex IDs (e.g. web_search_5bf669ff)
+            stripped = re.sub(r"_[0-9a-fA-F]{4,}$", "", tool_name)
+            if stripped != tool_name:
+                stripped_dotted = stripped.replace("_", ".")
+                if stripped_dotted in self._tools:
+                    return self._tools[stripped_dotted]
+                for name, tool in self._tools.items():
+                    if name.replace(".", "_") == stripped.replace(".", "_"):
+                        return tool
             return None
 
     def has(self, tool_name: str) -> bool:
@@ -161,10 +171,15 @@ class ToolRegistry:
         # 3. Execution with timeout protection
         logger.info("Executing tool '%s' with arguments: %s", tool_name, kwargs)
 
-        timeout = getattr(tool, "timeout", 10.0)
+        timeout = float(kwargs.get("timeout") or getattr(tool, "timeout", 60.0))
         try:
+            import inspect
+            sig = inspect.signature(tool.execute)
+            has_var_keyword = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            exec_kwargs = kwargs if has_var_keyword else {k: v for k, v in kwargs.items() if k in sig.parameters}
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(tool.execute, **kwargs)
+                future = executor.submit(tool.execute, **exec_kwargs)
                 result = future.result(timeout=timeout)
                 if not isinstance(result, ToolResult):
                     return ToolResult(

@@ -104,16 +104,24 @@ class OpenWakeWordDetector(BaseWakeWordDetector):
                     models_to_load.append(path)
 
             # 2. Standard named models from self.model_names
-            # Only download if not a file path and needed
+            known_oww_models = {"alexa", "hey_mycroft", "hey_jarvis", "hey_rhasspy", "timer", "weather"}
             download_candidates: list[str] = []
             for m in self.model_names:
-                if os.path.exists(m) or os.path.isabs(m):
+                m_clean = m.lower().replace(" ", "_")
+                if os.path.exists(m) or os.path.isabs(m) or m.endswith(".onnx") or m.endswith(".tflite"):
                     if m not in models_to_load:
                         models_to_load.append(m)
+                elif m_clean in known_oww_models:
+                    if m_clean not in models_to_load:
+                        models_to_load.append(m_clean)
+                        download_candidates.append(m_clean)
                 else:
-                    download_candidates.append(m)
-                    if m not in models_to_load:
-                        models_to_load.append(m)
+                    logger.debug("Model '%s' is handled via speech-to-text / hybrid wake gating.", m)
+
+            # Fallback if no native openWakeWord ONNX models found
+            if not models_to_load:
+                models_to_load.append("alexa")
+                download_candidates.append("alexa")
 
             if download_candidates:
                 try:

@@ -1,0 +1,11 @@
+{
+  "robot": "Bimo",
+  "hardware": "Raspberry Pi 3A+",
+  "display": "3.5 inch 480x320 SPI TFT",
+  "active_features": [
+    "face",
+    "speech",
+    "pc_agent",
+    "artifacts"
+  ]
+}

@@ -768,3 +768,159 @@ python -m windows_agent --host 0.0.0.0 --port 8088 --secret YOUR_SHARED_SECRET
 python test_pc_agent_live.py --host 192.168.1.2 --port 8088 --secret YOUR_SHARED_SECRET --live-apps
 ```
 
+---
+
+## Refinement Pass: Artifact & File Creation System
+
+Bimo features an autonomous, secure, backend file and document generation system. Bimo never relies on Notepad, Word, or any GUI application merely to generate files. The LLM routes file creation directly to dedicated backend artifact generators.
+
+### 1. Architecture Overview
+
+```text
+User: "Create a PDF explaining my project."
+      │
+      ▼
+LLM Function Calling
+      │
+      ▼
+artifact.create_pdf (ToolRegistry - CONFIRM Permission)
+      │
+      ▼
+ReportLab Story Engine
+      │
+      ▼
+ArtifactService (Security, Sandbox Boundary, Size Check)
+      │
+      ▼
+Atomic Write via .tmp/ Staging File
+      │
+      ▼
+Final Destination: artifacts/bimo_project.pdf
+      │
+      ▼
+ToolResult: {"success": true, "metadata": {"filename": "bimo_project.pdf", ...}}
+```
+
+### 2. Supported Formats & Generators
+
+| Category | Extensions | Generator Engine | Formatting Capabilities | Offline Capability |
+| :--- | :--- | :--- | :--- | :--- |
+| **Plain Text** | `.txt` | UTF-8 Native | Plain text notes, logs, transcripts | 100% Offline (Pi) |
+| **Markdown** | `.md` | UTF-8 Native | Headers, tables, lists, code blocks | 100% Offline (Pi) |
+| **Data** | `.json` | Standard Library `json` | Structured objects, validation, pretty-print | 100% Offline (Pi) |
+| **Data** | `.csv` | Standard Library `csv` | Strict tabular validation, RFC 4180 | 100% Offline (Pi) |
+| **Documents** | `.docx` | `python-docx` | Headings (H1-H3), paragraphs, bullet/numbered lists, tables | 100% Offline (Pi) |
+| **Documents** | `.pdf` | `reportlab` | Flowable story engine, custom typography, tables, page breaks | 100% Offline (Pi) |
+| **Workbooks** | `.xlsx` | `openpyxl` | Multi-sheet workbooks, colored headers, borders, auto-width | 100% Offline (Pi) |
+| **Local Images**| `.png` | `Pillow` (PIL) | Deterministic bar charts, status badges, flow diagrams | 100% Offline (Pi) |
+| **AI Images** | `.png`, `.jpg` | `OmniRouteImageProvider` | Remote AI image models via OpenAI-compatible `/v1/images/generations` | Requires Gateway |
+
+### 3. Security & Sandboxing Model
+
+The artifact engine enforces strict filesystem isolation:
+1. **Workspace Confinement**: All artifacts are restricted to the configured directory (`artifacts/` by default). Absolute paths, Windows drive letters (`C:\`), and UNC network paths are rejected immediately.
+2. **Anti-Traversal Enforcement**: Any filename containing `/`, `\`, `..`, null bytes, control characters, or prohibited symbols (`[\0<>:"/\\|?*]`) raises `ArtifactSecurityError`.
+3. **Atomic Writing**: New artifacts are written to `artifacts/.tmp/<uuid>.tmp`, synced to disk via `os.fsync()`, and atomically replaced via `os.replace()`. Intermediate crashes leave zero corrupted artifacts.
+4. **Collision Avoidance**: Existing user files are never silently overwritten. A non-destructive scheme automatically appends version counters (`report.pdf` -> `report (1).pdf` -> `report (2).pdf`).
+5. **Payload Size Quotas**: Configurable limits prevent memory exhaustion:
+   - `MAX_ARTIFACT_SIZE_MB=25` (general documents & sheets)
+   - `MAX_TEXT_ARTIFACT_SIZE_MB=5` (text, markdown, JSON, CSV)
+   - `MAX_IMAGE_SIZE_MB=15` (images)
+
+### 4. Image Generation Architecture
+
+Image creation is cleanly split into two distinct tiers:
+- **Remote AI Generation (`image.generate`)**:
+  Targeting OmniRoute's `/v1/images/generations` (or any compatible OpenAI image gateway) with configurable provider, model, and base URL. If no remote image gateway is configured or reachable, the provider cleanly reports its unavailability without fake claims.
+- **Deterministic Local Renderer (`image.render_local`)**:
+  An offline Pillow-based engine that renders clean, high-contrast visual artifacts directly on the Raspberry Pi:
+  - `bar_chart`: Visual comparison bars with automated scaling and labels.
+  - `badge`: High-visibility status badges and cards.
+  - `diagram`: Flowchart step sequence diagrams with directional arrows.
+
+### 5. Registered Tools & Permissions
+
+All artifact creation tools require explicit confirmation (`ToolPermission.CONFIRM`), preventing autonomous unconfirmed disk writes:
+
+- `artifact.create_text` (`CONFIRM`)
+- `artifact.create_markdown` (`CONFIRM`)
+- `artifact.create_json` (`CONFIRM`)
+- `artifact.create_csv` (`CONFIRM`)
+- `artifact.create_docx` (`CONFIRM`)
+- `artifact.create_pdf` (`CONFIRM`)
+- `artifact.create_xlsx` (`CONFIRM`)
+- `artifact.save_image` (`CONFIRM`)
+- `image.generate` (`CONFIRM`)
+- `image.render_local` (`CONFIRM`)
+- `artifact.list` (`SAFE` - read-only catalog query)
+- `artifact.get_info` (`SAFE` - read-only metadata query)
+
+### 6. Example Natural Language Interactions
+
+- *"Create a PDF listing the components of Bimo."*
+  -> Chooses `artifact.create_pdf` with title, headings, and tables. Creates real `.pdf` in `artifacts/`.
+- *"Create an Excel sheet tracking project phases."*
+  -> Chooses `artifact.create_xlsx` with structured sheets, columns, and rows. Creates real `.xlsx` in `artifacts/`.
+- *"Create a Word document summarizing our design."*
+  -> Chooses `artifact.create_docx` with sections and bullet points. Creates real `.docx` in `artifacts/`.
+- *"Create a chart comparing subsystem latency."*
+  -> Chooses `image.render_local` with `render_type="bar_chart"`. Creates real `.png` in `artifacts/`.
+- *"Create an AI image of a robot mascot."*
+  -> Chooses `image.generate` via OmniRoute if available, or clearly reports status.
+
+### 8. Visual-First Artifact Generation (Refinement)
+
+When users ask for visual guides, diagrams, presentations, or illustrated walk-throughs (e.g., *"Give me a graphical visual example of how to build a Minecraft base"*), Bimo does not default to plain-text walls of text. Instead, Bimo activates the **Visual-First Artifact Pipeline**:
+
+```text
+User Request: "Give me a graphical visual example of how to build a Minecraft base"
+      │
+      ▼
+ArtifactPlanner.detect_intent() ──► Intent: VISUAL_GUIDE
+      │
+      ▼
+ArtifactPlanner.create_plan() ────► Style: "minecraft", Images: 1 hero image, structured sections & callouts
+      │
+      ▼
+Image Generation Provider ────────► 1 Hero Image generated (or deterministic fallback if provider unavailable)
+      │
+      ▼
+VisualDocumentComposer ───────────► ReportLab Platypus layout engine:
+                                     - Styled Title Banner
+                                     - Aspect-scaled centered Hero Image with Caption
+                                     - Architectural Callout Cards with accent borders
+                                     - Specifications & Materials Tabular Grid
+                                     - Numbered Step Walkthrough
+                                     - Pro Detailing & Tips Box
+      │
+      ▼
+PDF Artifact Saved ───────────────► artifacts/minecraft_cozy_cottage_guide.pdf (19 KB, rich visual hierarchy)
+```
+
+#### Supported Artifact Intents (`ArtifactIntent`)
+- `TEXT_DOCUMENT`: Plain notes, raw text transcripts (0 images).
+- `STRUCTURED_DOCUMENT`: Formatted technical documents or reports (0 images default).
+- `VISUAL_GUIDE`: Visual tutorials, build guides, illustrated walkthroughs (default: 1 strong hero image).
+- `PRESENTATION`: Slide decks and pitch overviews.
+- `INFOGRAPHIC`: Diagrams, flowcharts, architectures.
+- `IMAGE`: Standalone images and illustrations (default: 1 image).
+- `SPREADSHEET`: Multi-sheet tabular workbooks.
+- `DATA_EXPORT`: Structured JSON or CSV datasets.
+
+#### Visual Styles & Theming
+- `minecraft`: Earthy spruce brown (`#3E2723`), cobblestone gray (`#424242`), oak log tan (`#8D6E63`), warm lantern amber (`#FF8F00`), and emerald highlight (`#2E7D32`).
+- `modern`: Sleek navy (`#0F172A`), indigo accent (`#3B82F6`), slate card background (`#F8FAFC`).
+- `clean`: Crisp minimalist monochrome with subtle dividers and airy whitespace.
+- `tech`: Cyber slate (`#1E293B`), cyan accent (`#06B6D4`), dark terminal callouts.
+- `medieval`: Parchment gold (`#78350F`), crimson banner (`#991B1B`), stone gray border (`#57534E`).
+
+#### Image Reuse & Asset Pipeline
+Images generated via `image.generate` or `artifact.create_visual_guide` receive a unique artifact ID (`artifact-image-XXXX`). Tools and composers reference existing image artifacts without redundant re-generation.
+
+#### Registered Planning & Visual Tools
+- `artifact.plan` (`SAFE`): Inspects requests and constructs structured layout plans without writing to disk.
+- `artifact.create_visual_guide` (`CONFIRM`): End-to-end visual guide orchestrator composing hero image, materials table, steps, callouts, and tips into a polished PDF.
+- `artifact.create_pdf` (`CONFIRM`): Enhanced with `style`, `hero_image_id`, `summary`, `callouts`, `materials`, and `tips`.
+
+
+

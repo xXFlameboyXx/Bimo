@@ -80,6 +80,7 @@ class PCAgentClient:
         self,
         command: str,
         arguments: Optional[Dict[str, Any]] = None,
+        timeout: Optional[float] = None,
     ) -> PCResponse:
         """Send an authenticated command execution request to the Windows PC Agent."""
         req_id = str(uuid.uuid4())
@@ -139,8 +140,21 @@ class PCAgentClient:
             method="POST",
         )
 
+        # Determine effective timeout: allow explicitly passed timeout, args["timeout"], or fallback to 1800s for installer tasks
+        effective_timeout = timeout
+        if effective_timeout is None and args and "timeout" in args:
+            try:
+                effective_timeout = float(args["timeout"])
+            except (ValueError, TypeError):
+                pass
+        if effective_timeout is None:
+            if command in ("pc.package_install", "pc.download_installer", "pc.run_installer"):
+                effective_timeout = 1800.0
+            else:
+                effective_timeout = self.config.request_timeout
+
         try:
-            with urllib.request.urlopen(http_req, timeout=self.config.request_timeout) as resp:
+            with urllib.request.urlopen(http_req, timeout=effective_timeout) as resp:
                 resp_bytes = resp.read()
                 data = json.loads(resp_bytes.decode("utf-8"))
                 response = PCResponse.from_dict(data)
